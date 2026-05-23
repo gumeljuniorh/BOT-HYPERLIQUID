@@ -70,7 +70,7 @@ export class HyperliquidExecutionEngine {
           p: formattedPx,
           s: formattedSz,
           r: reduceOnly,
-          t: { limit: { tif: "Gtc" } }
+          t: { limit: { tif: reduceOnly ? "Gtc" : "Ioc" } }
         }],
         grouping: "na"
       };

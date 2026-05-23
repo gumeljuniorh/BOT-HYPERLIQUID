@@ -25,8 +25,8 @@ export const botState: BotState = {
   },
   operationalState: "ACTIVE_TRADING",
   riskProfile: "BALANCED",
-  maxAllowedPositions: 3,
-  dynamicPositionLimitReason: "Normal multi-position mode active",
+  maxAllowedPositions: config.MAX_OPEN_POSITIONS,
+  dynamicPositionLimitReason: "Configured position limit active",
   previousPhase: null,
   lastScanTime: Date.now(),
   scansSinceLastEntry: 0,
@@ -70,7 +70,12 @@ export const botState: BotState = {
     maxExposure: 40,
     leverage: 2,
     stopLossPct: 1.2,
-    takeProfitPct: 3.0
+    takeProfitPct: 3.0,
+    minSignalConfidence: config.MIN_SIGNAL_CONFIDENCE,
+    minTradeQualityScore: config.MIN_TRADE_QUALITY_SCORE,
+    minExpectedMovePct: config.MIN_EXPECTED_MOVE_PCT,
+    maxFeeToExpectedRewardRatio: config.MAX_FEE_TO_EXPECTED_REWARD_RATIO,
+    maxOpenPositions: config.MAX_OPEN_POSITIONS
   },
   protection: {
     tpPrice: null,
@@ -187,7 +192,8 @@ export const botState: BotState = {
   },
   rejectedSetups: [],
   recentCandidates: [],
-  hypeStatus: "FOUND"
+  hypeStatus: "FOUND",
+  protectionReadiness: "PROTECTION_READY_FOR_EXECUTION"
 };
 
 export const HYPE_MAPPING = {

@@ -174,6 +174,7 @@ export function calculateSafeTpSl(
 
 export function getDynamicMaxPositions(): { limit: number; reason: string } {
   const now = Date.now();
+  const configuredMaxPositions = Math.max(1, Math.floor(botState.config.maxOpenPositions || config.MAX_OPEN_POSITIONS || 2));
   const isDrawdownPauseActive = botState.drawdownPauseUntil !== undefined && botState.drawdownPauseUntil !== null && now < botState.drawdownPauseUntil;
   
   if (botState.protectionStatus !== "CONFIRMED" || botState.blocker === "CRITICAL_FAILURE" || isDrawdownPauseActive || botState.drawdownSeverity === "HARD") {
@@ -202,22 +203,54 @@ export function getDynamicMaxPositions(): { limit: number; reason: string } {
                          
   if (isStrongMarket) {
     const reason = "Strong market / high confidence setups detected";
-    if (botState.maxAllowedPositions !== 4) {
-      console.log(`[MAX_OPEN_POSITIONS_UPDATED] Limit elevated to 4. Reason: ${reason}`);
+    const limit = Math.min(configuredMaxPositions, 4);
+    if (botState.maxAllowedPositions !== limit) {
+      console.log(`[MAX_OPEN_POSITIONS_UPDATED] Limit elevated to ${limit}. Reason: ${reason}`);
     }
-    botState.maxAllowedPositions = 4;
+    botState.maxAllowedPositions = limit;
     botState.dynamicPositionLimitReason = reason;
-    return { limit: 4, reason };
+    return { limit, reason };
   }
   
   const reason = "Normal multi-position mode active";
-  if (botState.maxAllowedPositions !== 3) {
-    console.log(`[MAX_OPEN_POSITIONS_UPDATED] Limit updated to 3. Reason: ${reason}`);
-    console.log("[THREE_POSITION_MODE_ACTIVE] Standard capacity activated: 3 positions allowed under normal conditions.");
+  const normalLimit = Math.min(configuredMaxPositions, 3);
+  if (botState.maxAllowedPositions !== normalLimit) {
+    console.log(`[MAX_OPEN_POSITIONS_UPDATED] Limit updated to ${normalLimit}. Reason: ${reason}`);
   }
-  botState.maxAllowedPositions = 3;
+  botState.maxAllowedPositions = normalLimit;
   botState.dynamicPositionLimitReason = reason;
-  return { limit: 3, reason };
+  return { limit: normalLimit, reason };
+}
+
+function updateProtectionTelemetry(symbol: string): { healthy: boolean; activeTpCount: number; activeSlCount: number; duplicateCount: number } {
+  if (!botState.telemetry) {
+    botState.telemetry = {
+      activeTpCount: 0,
+      activeSlCount: 0,
+      duplicateProtectionWarnings: 0,
+      protectionSyncHealth: "UNKNOWN"
+    };
+  }
+
+  const reduceOrders = (botState.activeOrders || []).filter((o: any) => o.coin === symbol && o.reduceOnly);
+  const activeSlCount = reduceOrders.filter((o: any) => o.isTrigger || o.triggerPx || parseFloat(o.triggerPx || "0") > 0).length;
+  const activeTpCount = reduceOrders.length - activeSlCount;
+  const duplicateCount = Math.max(0, activeSlCount - 1) + Math.max(0, activeTpCount - 1);
+  const healthy = activeSlCount === 1 && activeTpCount <= 1 && duplicateCount === 0;
+
+  botState.telemetry.activeSlCount = activeSlCount;
+  botState.telemetry.activeTpCount = activeTpCount;
+  botState.telemetry.duplicateProtectionWarnings = (botState.telemetry.duplicateProtectionWarnings || 0) + duplicateCount;
+  botState.telemetry.protectionSyncHealth = healthy ? "HEALTHY" : "UNHEALTHY";
+  botState.telemetry.lastProtectionSync = Date.now();
+
+  if (!healthy) {
+    console.warn(`[PROTECTION_HEALTH_UNHEALTHY] ${symbol} TP=${activeTpCount} SL=${activeSlCount} duplicates=${duplicateCount}`);
+  } else {
+    console.log(`[PROTECTION_HEALTHY] ${symbol} activeTpCount=${activeTpCount} activeSlCount=${activeSlCount} protectionSyncHealth=HEALTHY`);
+  }
+
+  return { healthy, activeTpCount, activeSlCount, duplicateCount };
 }
 
 export async function programmaticClosePosition(sym: string, reason: string): Promise<boolean> {
@@ -275,12 +308,19 @@ async function verifyProtectionOrders() {
     let hasSlExchange = false;
     let tpPriceOnExchange = null;
     let slPriceOnExchange = null;
+    let needsExchangeUpdate = false;
 
     const reduceOrders = botState.activeOrders?.filter(o => o.coin === sym && o.reduceOnly) || [];
     
     // Distinguish TP and SL based on order type rather than guessing by price sorting
     const activeSlOrders = reduceOrders.filter(o => o.isTrigger || o.triggerPx || parseFloat(o.triggerPx || "0") > 0);
     const activeTpOrders = reduceOrders.filter(o => !activeSlOrders.includes(o));
+    const duplicateProtectionExists = activeSlOrders.length > 1 || activeTpOrders.length > 1;
+    if (duplicateProtectionExists) {
+      needsExchangeUpdate = true;
+      allPositionsProtected = false;
+      console.warn(`[DUPLICATE_PROTECTION_DETECTED] ${sym} TP=${activeTpOrders.length} SL=${activeSlOrders.length}. Repair required before new execution.`);
+    }
     
     if (activeSlOrders.length > 0) {
         hasSlExchange = true;
@@ -303,7 +343,6 @@ async function verifyProtectionOrders() {
       hasTpExchange = true; // We don't consider TP missing if we are trailing
     }
 
-    let needsExchangeUpdate = false;
     let targetTp = perCoinProtection?.isTrailingActive ? null : perCoinProtection?.tpPrice;
     let targetSl = perCoinProtection?.trailingStopPrice || perCoinProtection?.slPrice;
 
@@ -369,10 +408,15 @@ async function verifyProtectionOrders() {
       const success = await executionEngine.placeTpSlOrders(sym, isLong, Math.abs(szi), targetTp, targetSl);
       
       if (success) {
+        const health = updateProtectionTelemetry(sym);
         if (sym === botState.activeSymbol && perCoinProtection) {
           perCoinProtection.tpPrice = targetTp;
           if (perCoinProtection.isTrailingActive) perCoinProtection.trailingStopPrice = targetSl;
           else perCoinProtection.slPrice = targetSl;
+        }
+        if (!health.healthy) {
+          anyRepairFailed = true;
+          console.error(`[DUPLICATE_PROTECTION_REPAIR_FAILED] ${sym} protection still unhealthy after repair.`);
         }
         console.log(`[PROTECTION_SYNCED] Protective limits placed/updated successfully for ${sym}.`);
       } else if (!hasTpExchange || !hasSlExchange) {
@@ -390,16 +434,26 @@ async function verifyProtectionOrders() {
         }
       }
     }
+    updateProtectionTelemetry(sym);
   }
 
   if (allPositionsProtected) {
     if (botState.protectionStatus !== "CONFIRMED") {
       botState.protectionStatus = "CONFIRMED";
+      botState.protectionReadiness = "TP_SL_REPAIR_COMPLETED";
+      console.log("[TP_SL_REPAIR_COMPLETED] All active positions now have synchronized reduce-only protection.");
+    }
+    botState.protectionReadiness = "PROTECTION_READY_FOR_EXECUTION";
+    if (botState.blocker && botState.blocker.startsWith("ENTRY_BLOCKED_PROTECTION_")) {
+      botState.blocker = null;
+      console.log("[PROTECTION_READY_FOR_EXECUTION] Protection blocker cleared after successful TP/SL repair.");
     }
   } else if (anyRepairFailed) {
     botState.protectionStatus = "FAILED_EMERGENCY_CLOSE_REQUIRED";
+    botState.protectionReadiness = "FAILED";
   } else {
     botState.protectionStatus = "REPAIRING";
+    botState.protectionReadiness = "REPAIRING";
   }
 }
 
@@ -1257,28 +1311,20 @@ function updateFeeEfficiency() {
   // Hard limits
   if (completedExits.length >= 4) {
     if (netPnlAfterFees < 0 && totalFees > 10.0) {
-      if (pauseType !== "HARD") {
-         console.log("[FEE_HARD_SUSPENSION_ACTIVE] Severe fee bleed. Extended 2hr hard pause.");
-         botState.feeEfficiencyPauseUntil = Date.now() + 2 * 60 * 60 * 1000;
-      }
+      console.log("[FEE_BLEED_WARNING] Severe fee bleed detected. Downgrading ranking/size instead of freezing execution.");
       isPaused = true;
-      pauseType = "HARD";
-      eliteEligibility = false;
+      pauseType = "SOFT";
+      eliteEligibility = true;
     } else if (rawRealized > 0 && Math.abs(feeToProfitRatio) > 0.55) {
-      if (pauseType !== "HARD") {
-         console.log("[FEE_HARD_SUSPENSION_ACTIVE] Fee-to-profit > 55%. Hard pause.");
-         botState.feeEfficiencyPauseUntil = Math.max(botState.feeEfficiencyPauseUntil || 0, Date.now() + 60 * 60 * 1000);
-      }
+      console.log("[FEE_BLEED_WARNING] Fee-to-profit > 55%. Applying soft risk reduction instead of hard pause.");
       isPaused = true;
-      pauseType = "HARD";
-      eliteEligibility = false;
+      pauseType = "SOFT";
+      eliteEligibility = true;
     } else if (recentExitsCount > 5) {
-      if (pauseType !== "HARD") {
-         botState.feeEfficiencyPauseUntil = Math.max(botState.feeEfficiencyPauseUntil || 0, Date.now() + 30 * 60 * 1000);
-      }
+      console.log("[OVERTRADING_WARNING] Recent exit velocity is high. Applying soft size/leverage reduction instead of full freeze.");
       isPaused = true;
-      pauseType = "HARD";
-      eliteEligibility = false;
+      pauseType = "SOFT";
+      eliteEligibility = true;
     }
   }
   
@@ -2932,7 +2978,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
       } else if (!botState.apiConnected) {
         blockerCode = "ENTRY_ENGINE_DISABLED";
       } else {
-        const exposureAllowed = botState.openPositions < 2 || (botState.openPositions < 4 && dynamicMoreThanTwoAllowed);
+        const exposureAllowed = botState.openPositions < limit || (botState.openPositions < (botState.config.maxOpenPositions || config.MAX_OPEN_POSITIONS || 3) && dynamicMoreThanTwoAllowed);
         if (!exposureAllowed) {
             blockerCode = "MAX_POSITIONS_REACHED";
         }
@@ -3016,7 +3062,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
                   targetExposure *= 0.5;
                   setupLeverage = Math.min(1, setupLeverage);
                   
-                  const maxPosLimit = botState.participationRecoveryStatus === "PARTICIPATION_PARALYSIS_RECOVERY_ACTIVE" ? 2 : 1;
+                  const maxPosLimit = botState.participationRecoveryStatus === "PARTICIPATION_PARALYSIS_RECOVERY_ACTIVE" ? Math.min(limit, 3) : limit;
                   if (botState.openPositions >= maxPosLimit) {
                     blockerCode = "MAX_POSITIONS_REACHED";
                   }
@@ -3104,15 +3150,23 @@ async function handleTradingLogic(isEmergencyMode = false) {
                           const reverseLockEnd = botState.reverseLockUntil || 0;
 
                           if (Date.now() < overtradingPauseEnd) {
-                            blockerCode = "OVERTRADING_PAUSE_ACTIVE";
+                            console.log(`[SOFT_RISK_OVERTRADING_PAUSE] Overtrading pause active for ${sym}; applying risk reduction instead of veto.`);
                           } else if (Date.now() < noTradeEnd) {
-                            blockerCode = "NO_TRADE_PERIOD_ACTIVE";
+                            console.log(`[SOFT_RISK_NO_TRADE_PERIOD] No-trade period active for ${sym}; applying risk reduction instead of veto.`);
                           } else if (Date.now() < reverseLockEnd) {
-                            blockerCode = "REVERSE_LOCK_ACTIVE";
-                          } else {
+                            console.log(`[SOFT_RISK_REVERSE_LOCK] Reverse lock active for ${sym}; applying risk reduction instead of veto.`);
+                          }
+                          {
                             let sizeMod = 1.0;
                             let leverageMod = 1.0;
                             let tpSlAggressivenessMod = 1.0;
+
+                            if (Date.now() < overtradingPauseEnd || Date.now() < noTradeEnd || Date.now() < reverseLockEnd) {
+                              sizeMod *= 0.5;
+                              leverageMod *= 0.6;
+                              tpSlAggressivenessMod *= 0.8;
+                              sig.tradeQualityScore = Math.max(10, (sig.tradeQualityScore || 60) - 15);
+                            }
 
                             // 1. Soft Risk: Fee Efficiency Pause
                             if (botState.feeEfficiency?.isPaused) {
@@ -3982,14 +4036,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
         if (
           !botState.marketScanner ||
           botState.marketScanner.liquidityScore < 20 ||
-          botState.marketScanner.spreadQuality < 20 ||
-          (signal.momentumScore || 0) < 0.15
+          botState.marketScanner.spreadQuality < 20
         ) {
           console.log(
-            `[ENTRY_FILTER] Trade blocked: ASTER/SKR strict confirmation not met.`,
+            `[ENTRY_FILTER] Trade blocked: catastrophic ASTER/SKR liquidity/spread conditions.`,
           );
-          botState.blocker = "STRICT_CONFIRMATION_REQUIRED";
+          botState.blocker = "CATASTROPHIC_LIQUIDITY_SPREAD";
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
+        }
+        if ((signal.momentumScore || 0) < 0.15) {
+          console.log(`[HIGH_VOL_MOMENTUM_WARNING] ASTER/SKR momentum is weak. Reducing risk instead of blocking.`);
+          signal.tradeQualityScore = Math.max(10, (signal.tradeQualityScore || 50) - 10);
+          (botState as any).isLowConfidenceContinuation = true;
         }
       }
 
@@ -4729,15 +4787,48 @@ async function handleTradingLogic(isEmergencyMode = false) {
         Fee Efficiency Factor (15%): ${feeFactor.toFixed(1)}
         Volatility Stability Factor (10%): ${volFactor.toFixed(1)}
         Overall Performance Factor (10%): ${overallFactor.toFixed(1)}
-        Overall Quality Score: ${tradeQualityScore} / 100 (Required: 45)`);
+        Overall Quality Score: ${tradeQualityScore} / 100 (Required: ${botState.config.minTradeQualityScore || config.MIN_TRADE_QUALITY_SCORE})`);
 
-      if (tradeQualityScore < 45) {
-        if (tradeQualityScore < 30) {
+      const minSignalConfidence = botState.config.minSignalConfidence || config.MIN_SIGNAL_CONFIDENCE;
+      const minTradeQualityScore = botState.config.minTradeQualityScore || config.MIN_TRADE_QUALITY_SCORE;
+      const minExpectedMovePct = botState.config.minExpectedMovePct || config.MIN_EXPECTED_MOVE_PCT;
+      const maxFeeToExpectedRewardRatio = botState.config.maxFeeToExpectedRewardRatio || config.MAX_FEE_TO_EXPECTED_REWARD_RATIO;
+      const estimatedRoundTripCostUsd = (botState.config.maxExposure || 40) * 0.0012;
+      const estimatedExpectedRewardUsd = (botState.config.maxExposure || 40) * ((signal.expectedMovePct || 0) / 100);
+      const feeToExpectedRewardRatio = estimatedExpectedRewardUsd > 0
+        ? estimatedRoundTripCostUsd / estimatedExpectedRewardUsd
+        : Infinity;
+
+      if ((signal.confidence || 0) < minSignalConfidence) {
+        console.log(
+          `[LOW_CONFIDENCE_WARNING] Confidence ${signal.confidence}% is below configured target ${minSignalConfidence}%. Applying reduced size/leverage instead of blocking.`,
+        );
+        (botState as any).isLowConfidenceContinuation = true;
+        signal.tradeQualityScore = Math.max(10, (signal.tradeQualityScore || 50) - 10);
+      }
+
+      if ((signal.expectedMovePct || 0) < minExpectedMovePct) {
+        console.log(
+          `[LOW_EXPECTED_MOVE_WARNING] Expected move ${(signal.expectedMovePct || 0).toFixed(2)}% is below target ${minExpectedMovePct.toFixed(2)}%. Applying reduced risk instead of blocking.`,
+        );
+        (botState as any).isLowExpectedMoveContinuation = true;
+        signal.tradeQualityScore = Math.max(10, (signal.tradeQualityScore || 50) - 12);
+      }
+
+      if (feeToExpectedRewardRatio > maxFeeToExpectedRewardRatio) {
+        console.log(
+          `[NEGATIVE_EDGE_AFTER_FEES_WARNING] Estimated cost/reward ratio ${feeToExpectedRewardRatio.toFixed(2)} exceeds max ${maxFeeToExpectedRewardRatio.toFixed(2)}. Applying size/leverage reduction instead of blocking.`,
+        );
+        (botState as any).isFeeHeavyContinuation = true;
+        signal.tradeQualityScore = Math.max(10, (signal.tradeQualityScore || 50) - 15);
+      }
+
+      if (tradeQualityScore < minTradeQualityScore) {
+        if (tradeQualityScore < minTradeQualityScore - 15) {
           console.log(
-            `[LOW_EXPECTANCY_SETUP_REJECTED] Trade blocked: TRADE_QUALITY_SCORE (${tradeQualityScore}) is below absolute minimum requirement of 30.`,
+            `[LOW_EXPECTANCY_WARNING] Trade quality score (${tradeQualityScore}) is below target ${minTradeQualityScore}. Applying reduced-size participation instead of hard rejection.`,
           );
-          // botState.blocker = "LOW_EXPECTANCY_SETUP_REJECTED";
-          // return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
+          (botState as any).isLowExpectancyContinuation = true;
         } else {
           console.log(
             `[QUALITY_DOWNGRADED] Trade quality score (${tradeQualityScore}) is moderate. Downgrading to reduced-size participation (60% smaller size, 1.5x max leverage, 0.5x SL) instead of hard rejection.`,
@@ -4976,8 +5067,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const dynamicLimitObj = getDynamicMaxPositions();
           const limit = dynamicLimitObj.limit;
           if (botState.openPositions >= limit && conf < 65) {
-             console.log(`[ENTRY_FILTER] Blocked: Confidence ${conf} too low for position ${botState.openPositions + 1} allocation.`);
-             botState.blocker = "CONFIDENCE_TOO_LOW_FOR_PORTFOLIO_MAX";
+             console.log(`[ENTRY_FILTER] Blocked: position limit ${limit} reached and setup is not strong enough to rotate capital.`);
+             botState.blocker = "MAX_POSITION_BLOCK_CONFIRMED";
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
           }
 
@@ -5170,6 +5261,22 @@ async function handleTradingLogic(isEmergencyMode = false) {
             customSlMultiplier = 0.5;
             isRiskAdjusted = true;
             console.log(`[QUALITY_DOWNGRADE_ADJUST] Downgrading risk: 60% size, cap leverage to 2x (preferred min), 0.5x SL multiplier.`);
+        }
+
+        if ((botState as any).isLowConfidenceContinuation) {
+            applySizingModifier("LOW_CONFIDENCE_CONT", 0.5);
+            setupLeverage = Math.min(2, setupLeverage);
+            customSlMultiplier = Math.min(customSlMultiplier, 0.7);
+            isRiskAdjusted = true;
+            console.log(`[LOW_CONFIDENCE_ADJUST] Confidence below target. Reducing size, capping leverage, and tightening stop instead of blocking.`);
+        }
+
+        if ((botState as any).isLowExpectedMoveContinuation || (botState as any).isFeeHeavyContinuation) {
+            applySizingModifier("LOW_EDGE_AFTER_COSTS", 0.5);
+            setupLeverage = Math.min(2, setupLeverage);
+            customSlMultiplier = Math.min(customSlMultiplier, 0.65);
+            isRiskAdjusted = true;
+            console.log(`[LOW_EDGE_AFTER_COSTS_ADJUST] Expected move/cost profile is thin. Executing only as reduced-risk participation.`);
         }
 
         if (botState.cooldownOverrideActive || botState.feePauseOverrideActive) {
@@ -5701,6 +5808,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
             console.log("POSITION_OPENED: Tracking new active position.");
           } else if (isResting) {
             console.log(`[ENTRY_ORDER_PENDING] Marketable entry limit submitted but is resting in orderbook (oid: ${botState.lastOrderId})`);
+            await new Promise((resolve) => setTimeout(resolve, 10000));
+            if (botState.lastOrderId) {
+              console.log(`[ENTRY_FILL_TIMEOUT_CANCELLED] Entry order ${botState.lastOrderId} did not fill within 10s. Canceling and reassessing.`);
+              const pendingEntry = (botState.activeOrders || []).find((o: any) => String(o.oid) === String(botState.lastOrderId) && !o.reduceOnly);
+              if (!pendingEntry) {
+                console.log(`[ENTRY_TIMEOUT_NO_ENTRY_CANCEL] Order ${botState.lastOrderId} is not an active non-reduce entry. Skipping cancel so TP/SL protection is untouched.`);
+              } else {
+                await executionEngine.cancelOrder(botState.activeSymbol, botState.lastOrderId);
+              }
+            }
+            botState.blocker = "ENTRY_NOT_FILLED_TIMEOUT";
+            return botState.blocker;
           }
           
           const contextEntryReason = `${signal.direction} confirmation met (${signal.consecutiveCandlesCount || 0}/3 candles). Regime ${signal.marketRegime} consistent (${signal.consecutiveRegimeCount || 0}/5 candles). Volatility: ${(signal.volatilityScore || 0).toFixed(2)}.`;
@@ -5757,9 +5876,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const tpSlSuccess = await executionEngine.placeTpSlOrders(botState.activeSymbol, isBuy, roundedBaseSize, tpPrice, slPrice);
           if (tpSlSuccess) {
               botState.protectionStatus = "CONFIRMED";
+              botState.protectionReadiness = "TP_SL_REPAIR_COMPLETED";
               console.log(`TP_SL_ATTACHED_CONFIRMED: Successfully attached protective orders for ${botState.activeSymbol}`);
+              console.log("TP_SL_REPAIR_COMPLETED");
+              botState.protectionReadiness = "PROTECTION_READY_FOR_EXECUTION";
+              console.log("PROTECTION_READY_FOR_EXECUTION");
           } else {
               console.error(`BOT: Warning: TP/SL orders failed to attach for ${botState.activeSymbol}.`);
+              botState.protectionStatus = "FAILED_EMERGENCY_CLOSE_REQUIRED";
+              botState.protectionReadiness = "FAILED";
+              botState.blocker = "TP_SL_ATTACHMENT_FAILED";
+              return botState.blocker;
           }
 
           // Calculate exact entry slippage

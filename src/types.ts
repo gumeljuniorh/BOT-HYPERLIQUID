@@ -30,6 +30,11 @@ export interface BotConfig {
   stopLossPct: number;
   takeProfitPct: number;
   minEntrySize?: number;
+  minSignalConfidence?: number;
+  minTradeQualityScore?: number;
+  minExpectedMovePct?: number;
+  maxFeeToExpectedRewardRatio?: number;
+  maxOpenPositions?: number;
 }
 
 export interface ScannerOpportunity {
@@ -172,6 +177,7 @@ export interface BotState {
     isChopRecovery?: boolean;
   };
   protectionStatus?: "CONFIRMED" | "MISSING" | "REPAIRING" | "FAILED_EMERGENCY_CLOSE_REQUIRED";
+  protectionReadiness?: "PROTECTION_READY_FOR_EXECUTION" | "TP_SL_REPAIR_COMPLETED" | "REPAIRING" | "FAILED" | null;
   cooldownUntil?: number;
   cooldownType?: "HARD" | "SOFT" | "LOSS_COOLDOWN" | "WIN_COOLDOWN" | "CHOP_COOLDOWN" | "VOLATILITY_RESET_COOLDOWN" | "NARRATIVE_CONTINUATION_COOLDOWN" | "EARLY_REENTRY_COOLDOWN";
   lastCooldownSymbol?: string;
@@ -526,4 +532,3 @@ export interface CMCTrendIntelligence {
   narrativeHeat?: { name: string; score: number; trend: "STRENGTHENING" | "WEAKENING" | "EMERGING" | "FADING"; representativeSymbols: string[] }[];
   watchlist?: WatchlistAsset[];
 }
-

@@ -933,12 +933,12 @@ function AppContent() {
           <div className="hidden md:flex h-14 border-b border-slate-800/80 bg-[#0c0e12]/50 items-center px-6 gap-8 overflow-x-auto whitespace-nowrap scrollbar-hide shrink-0">
              <BalanceDisplay label="TOTAL EQUITY" value={bot.accountEquity || 0} />
              <BalanceDisplay label="AVAILABLE MARGIN" value={bot.availableMargin || 0} />
-             <BalanceDisplay label="RESERVED POSITION MARGIN" value={bot.reservedPositionMargin !== undefined ? bot.reservedPositionMargin : (bot.marginUsed || 0)} />
-             <BalanceDisplay label="RESERVED ORDER MARGIN" value={bot.reservedOrderMargin || 0} />
-             <BalanceDisplay label="FREE COLLATERAL %" value={(bot.freeCollateralPct !== undefined ? bot.freeCollateralPct : (bot.accountEquity > 0 ? (bot.availableMargin / bot.accountEquity) * 100 : 100)).toFixed(1) + "%"} isString />
-             <BalanceDisplay label="PORTFOLIO EXPOSURE USED %" value={(bot.portfolioExposureUsedPct || 0).toFixed(1) + "%"} isString />
+             {isAdvancedMode && <BalanceDisplay label="RESERVED POSITION MARGIN" value={bot.reservedPositionMargin !== undefined ? bot.reservedPositionMargin : (bot.marginUsed || 0)} />}
+             {isAdvancedMode && <BalanceDisplay label="RESERVED ORDER MARGIN" value={bot.reservedOrderMargin || 0} />}
+             {isAdvancedMode && <BalanceDisplay label="FREE COLLATERAL %" value={(bot.freeCollateralPct !== undefined ? bot.freeCollateralPct : (bot.accountEquity > 0 ? (bot.availableMargin / bot.accountEquity) * 100 : 100)).toFixed(1) + "%"} isString />}
+             {isAdvancedMode && <BalanceDisplay label="PORTFOLIO EXPOSURE USED %" value={(bot.portfolioExposureUsedPct || 0).toFixed(1) + "%"} isString />}
              <BalanceDisplay label="OPEN POSITION COUNT" value={bot.openPositions || 0} isString />
-             <BalanceDisplay label="RESTING ENTRY ORDER COUNT" value={bot.restingEntryOrderCount !== undefined ? bot.restingEntryOrderCount : 0} isString />
+             {isAdvancedMode && <BalanceDisplay label="RESTING ENTRY ORDER COUNT" value={bot.restingEntryOrderCount !== undefined ? bot.restingEntryOrderCount : 0} isString />}
              <BalanceDisplay label="REALIZED PNL" value={bot.realizedPnl || 0} color={(bot.realizedPnl || 0) >= 0 ? "emerald" : "rose"} />
              <BalanceDisplay label="UNREALIZED PNL" value={bot.unrealizedPnl || 0} color={(bot.unrealizedPnl || 0) >= 0 ? "emerald" : "rose"} />
           </div>
@@ -1036,24 +1036,28 @@ function AppContent() {
                   <p className="text-[9px] uppercase font-bold text-[#8A4FFF] tracking-wider font-mono">Available Margin</p>
                   <p className="text-xl font-black font-mono text-white">${bot.availableMargin.toFixed(2)}</p>
                 </div>
-                {isAdvancedMode && (
-                  <>
-                    {/* Risk Mode */}
-                    <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
-                      <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Risk Mode</p>
-                      <p className={cn(
-                        "text-xs font-black uppercase font-mono mt-1",
-                        bot.blocker && ["FEE_HARD_SUSPENSION_ACTIVE", "FEE_SOFT_SUSPENSION_ACTIVE", "BELOW_PREFERRED_SAFETY_TARGET"].includes(bot.blocker)
-                          ? "text-amber-400"
-                          : "text-emerald-400"
-                      )}>
-                        {bot.blocker && ["FEE_HARD_SUSPENSION_ACTIVE", "FEE_SOFT_SUSPENSION_ACTIVE", "BELOW_PREFERRED_SAFETY_TARGET"].includes(bot.blocker)
-                          ? "Risk Reduced"
-                          : "Balanced"}
-                      </p>
-                    </div>
-                  </>
-                )}
+                {/* Risk Mode */}
+                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
+                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Risk Mode</p>
+                  <p className={cn(
+                    "text-xs font-black uppercase font-mono mt-1",
+                    bot.drawdownSeverity && bot.drawdownSeverity !== "NONE"
+                      ? "text-rose-400"
+                      : bot.feeEfficiency?.isPaused || bot.cooldownUntil && bot.cooldownUntil > Date.now()
+                        ? "text-amber-400"
+                        : "text-emerald-400"
+                  )}>
+                    {bot.drawdownSeverity && bot.drawdownSeverity !== "NONE"
+                      ? `${bot.drawdownSeverity} Drawdown`
+                      : bot.feeEfficiency?.isPaused || bot.cooldownUntil && bot.cooldownUntil > Date.now()
+                        ? "Risk Reduced"
+                        : "Balanced"}
+                  </p>
+                </div>
+                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
+                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Blocker</p>
+                  <p className="text-xs font-black uppercase font-mono text-white mt-1 truncate" title={bot.blocker || "None"}>{bot.blocker || "None"}</p>
+                </div>
                 {/* Market Regime */}
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
                   <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Market Regime</p>
@@ -1089,6 +1093,26 @@ function AppContent() {
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
                   <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Expectancy After Fees</p>
                   <p className="text-xl font-black text-white">${bot.analytics?.expectancyAfterFees !== undefined ? bot.analytics.expectancyAfterFees.toFixed(2) : "0.00"}</p>
+                </div>
+                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
+                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">TP/SL Health</p>
+                  <p className={cn("text-xs font-black uppercase mt-1", bot.openPositions === 0 || bot.protectionStatus === "CONFIRMED" ? "text-emerald-400" : "text-rose-400")}>
+                    {bot.openPositions === 0 ? "Ready" : bot.protectionReadiness || bot.protectionStatus || "Unknown"}
+                  </p>
+                </div>
+                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
+                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">All-Time Gain / Loss</p>
+                  <p className="text-sm font-black text-white">
+                    <span className="text-emerald-400">+${(bot.analytics?.largestWin || 0).toFixed(2)}</span>
+                    <span className="text-slate-600 px-1">/</span>
+                    <span className="text-rose-400">-${Math.abs(bot.analytics?.largestLoss || 0).toFixed(2)}</span>
+                  </p>
+                </div>
+                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
+                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Net PnL</p>
+                  <p className={cn("text-xl font-black", (bot.analytics?.netProfitability || 0) >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                    ${(bot.analytics?.netProfitability || 0).toFixed(2)}
+                  </p>
                 </div>
               </div>
             </div>

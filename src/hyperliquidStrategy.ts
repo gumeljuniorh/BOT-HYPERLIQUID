@@ -19,6 +19,10 @@ export interface StrategySignal {
   shortConfidence?: number;
   reversalProbability?: number;
   exhaustionProbability?: number;
+  continuationConfidence?: number;
+  reversalConfidence?: number;
+  trendCollapseProbability?: number;
+  selectedSideReason?: string;
   trendPhase?: string;
 }
 
@@ -257,6 +261,10 @@ export class HyperliquidStrategy {
     let shortConfidence = 0;
     let reversalProbability = 0;
     let exhaustionProbability = 0;
+    let continuationConfidence = 0;
+    let reversalConfidence = 0;
+    let trendCollapseProbability = 0;
+    let selectedSideReason = "NO_EDGE";
     let trendPhase = "DEVELOPING_TREND";
 
     // 1. Establish exhaustion and reversal probabilities
@@ -269,6 +277,10 @@ export class HyperliquidStrategy {
     } else if (marketRegime === "EXTREME_DIRECTIONAL_VOL") {
       reversalProbability = 35;
     }
+    trendCollapseProbability = Math.max(
+      marketRegime === "RANGING_CHOP" || marketRegime === "CHAOTIC_VOL" ? 65 : 10,
+      Math.min(95, Math.round((flips * 18) + (exhaustionProbability * 0.35)))
+    );
 
     // 2. Trend Phase Engine: map regimes 1-to-1 to custom 8 phases
     if (marketRegime === "CHAOTIC_VOL" || marketRegime === "RANGING_CHOP") {
@@ -322,6 +334,13 @@ export class HyperliquidStrategy {
          reversalProbability = Math.max(reversalProbability, 75);
       }
     }
+
+    continuationConfidence = isEmaBullish
+      ? Math.max(0, Math.min(100, Math.round(longConfidence - reversalProbability * 0.25)))
+      : Math.max(0, Math.min(100, Math.round(shortConfidence - reversalProbability * 0.25)));
+    reversalConfidence = isEmaBullish
+      ? Math.max(0, Math.min(100, Math.round(shortConfidence + reversalProbability * 0.2)))
+      : Math.max(0, Math.min(100, Math.round(longConfidence + reversalProbability * 0.2)));
 
     // 5. Confidence Score / Setup Quality
     let rawDirection: "LONG" | "SHORT" | "NONE" = "NONE";
@@ -403,6 +422,25 @@ export class HyperliquidStrategy {
     let lastProcessedCandleTime = this.lastProcessedCandleTimeMap.get(symbol) || 0;
     let lastMarketRegime = this.lastMarketRegimeMap.get(symbol) || null;
     let consecutiveRegimeCount = this.consecutiveRegimeCountMap.get(symbol) || 0;
+
+    if (rawDirection === "NONE") {
+      const bestSideConfidence = Math.max(longConfidence, shortConfidence);
+      const hasDirectionalEdge = bestSideConfidence >= 55 && isExpectedMoveValid && marketRegime !== "RANGING_CHOP" && marketRegime !== "CHAOTIC_VOL";
+      if (hasDirectionalEdge) {
+        rawDirection = longConfidence >= shortConfidence ? "LONG" : "SHORT";
+        confidence = Math.max(confidence, Math.round(bestSideConfidence * 0.85));
+        console.log(`[DIRECTIONAL_EDGE_RECOVERED] ${symbol} recovered ${rawDirection} from side-specific confidence. long=${longConfidence}, short=${shortConfidence}, regime=${marketRegime}`);
+      }
+    }
+
+    if (isReversalZone && reversalConfidence >= continuationConfidence && reversalConfidence >= 55) {
+      rawDirection = isEmaBullish ? "SHORT" : "LONG";
+      confidence = Math.max(confidence, reversalConfidence);
+      selectedSideReason = `exhaustion reversal: ${rawDirection} first`;
+      console.log(`[EXHAUSTION_REVERSAL_PRIORITIZED] ${symbol} evaluating ${rawDirection} first. reversal=${reversalConfidence}, continuation=${continuationConfidence}, exhaustion=${exhaustionProbability}`);
+    } else if (rawDirection !== "NONE") {
+      selectedSideReason = `${rawDirection} ${isReversalZone ? "reversal" : "continuation"} edge`;
+    }
 
     // 7. Signal Confirmation Window (Requirement 2 with refined Real-time Validity Tracking)
     // Track validity continuously across ticks and candle completions
@@ -516,6 +554,10 @@ export class HyperliquidStrategy {
 
     // Calculate quality score
     const tradeQualityScore = this.calculateTradeQualityScore(finalConfidence, marketRegime, volatilityScore);
+    const selectedSide = confirmedDirection !== "NONE" ? confirmedDirection : rawDirection;
+    console.log(
+      `[DIRECTION_DECISION] ${symbol} | long=${longConfidence} | short=${shortConfidence} | continuation=${continuationConfidence} | reversal=${reversalConfidence} | selected=${selectedSide} | reason=${selectedSideReason} | finalScore=${tradeQualityScore}`
+    );
 
     // Calculate ATR (14 period)
     let atrPct = 0;
@@ -550,6 +592,10 @@ export class HyperliquidStrategy {
       shortConfidence,
       reversalProbability,
       exhaustionProbability,
+      continuationConfidence,
+      reversalConfidence,
+      trendCollapseProbability,
+      selectedSideReason,
       trendPhase
     };
   }

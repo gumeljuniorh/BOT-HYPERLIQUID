@@ -4,6 +4,11 @@ import { hClient } from "./hyperliquidClient.js";
 
 export class HyperliquidRiskManager {
   checkRisk(): boolean {
+    if (config.DRY_RUN) {
+      botState.blocker = null;
+      return true;
+    }
+
     if (!config.HYPERLIQUID_PRIVATE_KEY) {
       botState.blocker = "PRIVATE_KEY_MISSING. PLEASE ADD IT IN THE SETTINGS.";
       return false;
