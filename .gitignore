@@ -2,7 +2,24 @@ node_modules/
 build/
 dist/
 coverage/
+.npm-cache/
 .DS_Store
 *.log
 .env*
 !.env.example
+
+# Local secrets and wallet material
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+wallet*.json
+private*.json
+secret*.json
+
+# Runtime bot state
+.bot_state_snapshot.json
+trades_history.json
+*.state.json
+*.runtime.json
