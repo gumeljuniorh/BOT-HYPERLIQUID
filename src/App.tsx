@@ -695,7 +695,7 @@ function AppContent() {
           animate={{ opacity: [0.4, 1, 0.4] }}
           transition={{ duration: 1.5, repeat: Infinity }}
         >
-          Initializing Executor System...
+          Initializing Zepoul Bot Perps...
         </motion.div>
       </div>
     );
@@ -706,10 +706,10 @@ function AppContent() {
       {/* Header Section */}
       <header className="h-16 shrink-0 border-b border-slate-800 bg-[#0F1115] px-4 md:px-6 flex items-center justify-between z-20">
         <div className="flex items-center space-x-3 md:space-x-4">
-          <div className="w-7 h-7 md:w-8 md:h-8 bg-[#8A4FFF] rounded flex items-center justify-center font-bold text-white shadow-[0_0_15px_rgba(138,79,255,0.4)]">H</div>
+          <div className="w-7 h-7 md:w-8 md:h-8 bg-[#8A4FFF] rounded flex items-center justify-center font-bold text-white shadow-[0_0_15px_rgba(138,79,255,0.4)]">Z</div>
           <div>
             <h1 className="text-xs md:text-sm font-bold tracking-[0.2em] text-white uppercase italic font-serif">
-              H-Executor <span className="opacity-40 font-sans font-normal not-italic tracking-normal">V2.0</span>
+              Zepoul Bot Perps
             </h1>
             <div className="hidden md:flex items-center space-x-3 mt-0.5">
               <StatusIndicator 
