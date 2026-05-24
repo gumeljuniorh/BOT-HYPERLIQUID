@@ -2272,6 +2272,18 @@ function AppContent() {
                       </span>
                       <div className="space-y-3 pt-2">
                         <div className="flex justify-between items-baseline">
+                          <span className="text-xs text-slate-400">Wallet Equity</span>
+                          <span className="font-mono text-xs font-bold text-white">
+                            ${(bot?.accountEquity || 0).toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-baseline">
+                          <span className="text-xs text-slate-400">Base Position Size</span>
+                          <span className="font-mono text-xs font-bold text-emerald-400">
+                            {bot?.basePositionSize ? `$${bot.basePositionSize.toFixed(2)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-baseline">
                           <span className="text-xs text-slate-400 font-bold">Preferred Entry Size</span>
                           <span className="font-mono text-xs font-black text-amber-400">
                             ${(bot?.preferredEntrySize || 40).toFixed(2)} USDC
@@ -2281,6 +2293,24 @@ function AppContent() {
                           <span className="text-xs text-slate-400">Last/Active Actual Entry</span>
                           <span className="font-mono text-xs font-bold text-sky-400">
                             {bot?.actualEntrySize ? `$${bot.actualEntrySize.toFixed(2)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-baseline">
+                          <span className="text-xs text-slate-400">% Equity Used</span>
+                          <span className="font-mono text-xs font-bold text-white">
+                            {bot?.positionSizePctOfEquity !== undefined ? `${bot.positionSizePctOfEquity.toFixed(1)}%` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-baseline">
+                          <span className="text-xs text-slate-400">Leverage Used</span>
+                          <span className="font-mono text-xs font-bold text-white">
+                            {bot?.leverageUsed ? `${bot.leverageUsed}x` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-baseline">
+                          <span className="text-xs text-slate-400">Effective Exposure</span>
+                          <span className="font-mono text-xs font-bold text-sky-400">
+                            {bot?.effectiveExposure ? `$${bot.effectiveExposure.toFixed(2)}` : "—"}
                           </span>
                         </div>
                         <div className="flex justify-between items-baseline">
@@ -2297,7 +2327,7 @@ function AppContent() {
                         </div>
                         {bot?.entryTier && bot.entryTier !== "NONE" && bot?.reducedSizeReason && (
                           <div className="text-[10px] text-slate-400 italic bg-slate-900/60 p-2 rounded border border-slate-800/40 font-mono mt-1">
-                            <span className="text-amber-400 font-bold">Reason:</span> {bot.reducedSizeReason}
+                            <span className="text-amber-400 font-bold">Reason:</span> {bot.sizeReason || bot.reducedSizeReason}
                           </div>
                         )}
                         <div className="flex justify-between items-baseline">
@@ -2332,6 +2362,12 @@ function AppContent() {
                       </div>
 
                       <div className="pt-3 border-t border-slate-800/60">
+                        <div className="flex items-center justify-between text-[10px] font-mono mb-2">
+                          <span className="text-slate-500">Runner Capture</span>
+                          <span className={cn("font-bold", bot?.runnerCaptureStatus === "ACTIVE" ? "text-emerald-400" : "text-slate-400")}>
+                            {bot?.runnerCaptureStatus || "INACTIVE"}
+                          </span>
+                        </div>
                         <div className="flex items-center justify-between text-[10px] font-mono">
                           <span className="text-slate-500">Margin Health Index</span>
                           <span className={cn(
@@ -2536,20 +2572,20 @@ function AppContent() {
                   <div className="space-y-3 w-full">
                     <span className="text-[10px] uppercase font-bold text-slate-500 tracking-widest flex items-center justify-between">
                       <div className="flex flex-row items-center gap-1.5"><ShieldAlert className="w-3.5 h-3.5 text-rose-400" /> System Friction & Fee Bleed Tracker</div>
-                      <div className="text-[9px] uppercase tracking-tighter">Overall Fee Ratio: {(bot.feeEfficiency?.feeToProfitRatio || 0).toFixed(2)}</div>
+                      <div className="text-[9px] uppercase tracking-tighter">Fee Mode: {bot.feeEfficiency?.feeMode || "CLEAR"} · Overall Ratio: {(bot.feeEfficiency?.feeToProfitRatio || 0).toFixed(2)}</div>
                     </span>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {/* Left: Pause States */}
                       <div className="space-y-2 border border-rose-900/30 bg-rose-950/10 rounded p-3">
-                        <h4 className="text-[10px] font-bold text-rose-400 tracking-widest uppercase pb-1 border-b border-rose-900/30">Active Pauses</h4>
+                        <h4 className="text-[10px] font-bold text-rose-400 tracking-widest uppercase pb-1 border-b border-rose-900/30">Fee State</h4>
                         <div className="flex justify-between text-[10px] font-mono">
-                           <span className="text-slate-400">Pause State:</span>
-                           <span className={bot.feeEfficiency?.isPaused ? "text-rose-400 font-bold" : "text-emerald-400 font-bold"}>
-                             {bot.feeEfficiency?.isPaused ? bot.feeEfficiency.pauseType + " PAUSE" : "CLEAR"}
+                           <span className="text-slate-400">Mode:</span>
+                           <span className={bot.feeEfficiency?.feeMode === "FEE_HARD_BLOCK" ? "text-rose-400 font-bold" : bot.feeEfficiency?.feeMode === "FEE_REDUCTION" ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
+                             {bot.feeEfficiency?.feeMode || "CLEAR"}
                            </span>
                         </div>
-                        {bot.feeEfficiency?.isPaused && (
+                        {bot.feeEfficiency?.isPaused && bot.feeEfficiency?.feeMode === "FEE_HARD_BLOCK" && (
                           <div className="flex justify-between text-[10px] font-mono">
                              <span className="text-slate-400">Remaining time:</span>
                              <span className="text-white">
@@ -2558,7 +2594,23 @@ function AppContent() {
                           </div>
                         )}
                         <div className="flex justify-between text-[10px] font-mono">
-                           <span className="text-slate-400">Elite Soft Pause Override:</span>
+                           <span className="text-slate-400">Rolling 10 / 20 / 50:</span>
+                           <span className="text-white">
+                             {(bot.feeEfficiency?.rollingFeeRatio10 || 0).toFixed(2)} / {(bot.feeEfficiency?.rollingFeeRatio20 || 0).toFixed(2)} / {(bot.feeEfficiency?.rollingFeeRatio50 || 0).toFixed(2)}
+                           </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono">
+                           <span className="text-slate-400">Fee-Adjusted PnL:</span>
+                           <span className={(bot.feeEfficiency?.feeAdjustedNetPnl || 0) >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                             ${(bot.feeEfficiency?.feeAdjustedNetPnl || 0).toFixed(2)}
+                           </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono">
+                           <span className="text-slate-400">Breaker Reason:</span>
+                           <span className="text-slate-300 text-right max-w-[55%]">{bot.feeEfficiency?.feeBreakerReason || "NONE"}</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono">
+                           <span className="text-slate-400">Elite Soft Override:</span>
                            <span className={bot.feeEfficiency?.eliteOverrideEligibility ? "text-indigo-400 font-bold" : "text-slate-500"}>
                              {bot.feeEfficiency?.eliteOverrideEligibility ? "ALLOWED" : "BLOCKED"}
                            </span>
