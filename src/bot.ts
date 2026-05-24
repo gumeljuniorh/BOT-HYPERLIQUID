@@ -4648,14 +4648,35 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const rewardFeeHealthy = rrRatioLocal >= 0.35;
 
           const hasFreshStructure = priceMovedAway && freshBreakoutConfirmed && strongTrendPersistence && (cmcRotateSupport || rewardFeeHealthy);
+          const sameDirection = lastExit.side === signal.direction;
+          const setupQualityStrong = (signal.confidence || 0) >= 70 && (signal.tradeQualityScore || 0) >= 55;
+          const guardTrace = {
+            symbol: botState.activeSymbol,
+            lastExitTime,
+            lastExitReason: lastExit.exitReason || "UNKNOWN",
+            timeSinceExitSeconds: Number(timeSinceExitSeconds.toFixed(1)),
+            requiredDelaySec,
+            sameDirection,
+            priceMovedAway,
+            freshBreakoutConfirmed,
+            strongTrendPersistence,
+            rewardFeeHealthy,
+            churnActive: isChurnActive,
+            setupQualityStrong,
+            finalGuardDecision: hasFreshStructure && setupQualityStrong && !isChurnActive ? "ALLOW_FRESH_STRUCTURE" : "HARD_BLOCK_TRUE_CHURN"
+          };
+          console.log(`[REENTRY_GUARD_TRACE] ${JSON.stringify(guardTrace)}`);
 
-          if (hasFreshStructure && !isChurnActive) {
+          if (hasFreshStructure && setupQualityStrong && !isChurnActive) {
             console.log(`[REENTRY_APPROVED_FRESH_STRUCTURE] Same-symbol faster re-entry approved for ${botState.activeSymbol}. Fresh continuation pattern holds.`);
           } else {
-            console.log(`[SAME_SYMBOL_REENTRY_GUARD_ACTIVE] Guard blocked re-entry on ${botState.activeSymbol} (${exitTypeLabel}). Cool-off: ${timeSinceExitSeconds.toFixed(0)}s / ${requiredDelaySec}s. Churn: ${isChurnActive}`);
-            botState.blocker = "SAME_SYMBOL_REENTRY_GUARD_ACTIVE";
+            console.log(`[SAME_SYMBOL_REENTRY_HARD_BLOCK] Guard blocked re-entry on ${botState.activeSymbol} (${exitTypeLabel}). Cool-off: ${timeSinceExitSeconds.toFixed(0)}s / ${requiredDelaySec}s. Churn: ${isChurnActive}`);
+            console.log(`[REENTRY_BLOCKED_TRUE_CHURN] Same-symbol re-entry failed fresh-structure or quality test.`);
+            botState.blocker = "SAME_SYMBOL_REENTRY_HARD_BLOCK";
             return botState.blocker;
           }
+        } else if (isChurnActive || signal.confidence < 55 || (signal.expectedMovePct || 0) < 0.35) {
+          console.log(`[SAME_SYMBOL_REENTRY_SOFT_GUARD] ${botState.activeSymbol} re-entry allowed past cooldown but marked reduced-priority. churn=${isChurnActive}, confidence=${signal.confidence}, expectedMove=${(signal.expectedMovePct || 0).toFixed(2)}%.`);
         }
       }
 
@@ -6594,6 +6615,28 @@ async function handleTradingLogic(isEmergencyMode = false) {
             }
           }
         }
+      }
+    }
+
+    if (isExitTriggered) {
+      const structuralExitReasons = [
+        "STOP_LOSS_HIT",
+        "TAKE_PROFIT_HIT",
+        "SIGNAL_REVERSED",
+        "MOMENTUM_COLLAPSED_EXIT_RUNNER",
+        "LIQUIDITY_DETERIORATED_EXIT_RUNNER",
+        "VOLATILITY_UNSTABLE_EXIT_RUNNER",
+        "EMERGENCY_CLOSE_TP_SL_MISSING",
+        "EMERGENCY_CLOSE_LOW_MARGIN",
+        "TRAILING_EXIT_TRIGGERED"
+      ];
+      const isStructuralExit = structuralExitReasons.some((reason) => exitReason.includes(reason));
+      const profitQualityThresholdPct = 0.22;
+      if (!config.MICRO_SCALP_MODE_ENABLED && pnlPct > 0 && pnlPct < profitQualityThresholdPct && !isStructuralExit) {
+        console.log(`[MICRO_SCALP_EXIT_BLOCKED] ${botState.activeSymbol} tiny profitable exit blocked. PnL=${pnlPct.toFixed(3)}%, reason=${exitReason}, threshold=${profitQualityThresholdPct.toFixed(2)}%.`);
+        console.log(`[PREMATURE_EXIT_BLOCKED] Winner development preserved until TP/SL, structure break, reversal, liquidity deterioration, or protection event.`);
+        isExitTriggered = false;
+        exitReason = "";
       }
     }
 
