@@ -19,9 +19,9 @@ export function formatHyperliquidPrice(px: number): string {
 }
 
 export class HyperliquidExecutionEngine {
-  async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean) {
+  async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean, isIoc: boolean = false) {
     const side = isBuy ? 'BUY' : 'SELL';
-    console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly}`);
+    console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly} isIoc=${isIoc}`);
     
     // NEW: Add slot check for non-reduce-only orders (entry orders only)
     if (!reduceOnly) {
@@ -87,7 +87,7 @@ export class HyperliquidExecutionEngine {
           p: formattedPx,
           s: formattedSz,
           r: reduceOnly,
-          t: { limit: { tif: "Gtc" } }
+          t: { limit: { tif: isIoc ? "Ioc" : "Gtc" } }
         }],
         grouping: "na"
       };
@@ -282,12 +282,15 @@ export class HyperliquidExecutionEngine {
            if (cancelResult && cancelResult.status === "err" && typeof cancelResult.response === "string" && cancelResult.response.includes("Too many cumulative requests sent")) {
                botState.apiRateLimitUntil = Date.now() + 60000;
                botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+               console.warn(`[API_BUDGET_THROTTLED] Deferred TP/SL cancel due to global API limits.`);
+               return false;
            }
            // Optimistically remove cancelled orders from local state
            const cancelOids = cancels.map(c => String(c.o));
            botState.activeOrders = botState.activeOrders.filter(o => !cancelOids.includes(String(o.oid)));
        } catch(e) {
            console.error("[PROTECTION_RECONCILIATION] Failed to cancel stale protection:", e);
+           return false;
        }
     }
 

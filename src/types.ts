@@ -92,6 +92,10 @@ export interface BotState {
   apiConnected: boolean;
   wssConnected: boolean;
   apiRateLimitUntil?: number;
+  routerBlockCooldowns?: Record<string, number>;
+  positionSizeInvalidCooldowns?: Record<string, number>;
+  executionAttemptsMap?: Record<string, number>;
+  executionThrottleUntil?: number;
   wssReconnectAttempts?: number;
   lastWssTime?: number;
   accountEquity: number;
@@ -150,13 +154,6 @@ export interface BotState {
   chopState?: "TRUE_CHOP_NO_TRADE" | "DEVELOPING_BREAKOUT" | "DIRECTIONAL_CHOP_RECOVERY" | "CHOP_RECOVERY_MONITORING" | "CHOP_CLEARED_DIRECTIONAL" | "CHOP_ENTRY_APPROVED_REDUCED_RISK" | "NONE";
   preferredEntrySize?: number;
   actualEntrySize?: number;
-  basePositionSize?: number;
-  positionSizePctOfEquity?: number;
-  sizeTier?: "STANDARD" | "STRONG" | "ELITE" | "MICRO" | "NONE" | string;
-  sizeReason?: string;
-  leverageUsed?: number;
-  effectiveExposure?: number;
-  runnerCaptureStatus?: "INACTIVE" | "ACTIVE" | "BREAKEVEN_LOCKED" | "PROFIT_LOCKED" | "STRUCTURE_TRAILING" | string;
   entryTier?: "STANDARD_ENTRY" | "REDUCED_ENTRY" | "MICRO_ENTRY" | "NONE";
   reducedSizeReason?: string;
   recoveryReason?: string;
@@ -179,13 +176,7 @@ export interface BotState {
     trailingStopPrice: number | null;
     isTrailingActive: boolean;
     highestUnrealizedPnlPct?: number;
-    highestFavorablePrice?: number;
-    maxFavorableExcursionPct?: number;
     currentLockedProfitPct?: number;
-    lockedProfitPct?: number;
-    dynamicSlPrice?: number | null;
-    runnerModeStatus?: string;
-    structureBreakLevel?: number | null;
     activeProfitLockLevel?: string;
     isLateButTradeable?: boolean;
     requiresTightTrailing?: boolean;
@@ -219,16 +210,6 @@ export interface BotState {
   feeEfficiency?: {
     netPnlAfterFees: number;
     feeToProfitRatio: number;
-    feeMode?: "CLEAR" | "FEE_CAUTION" | "FEE_REDUCTION" | "FEE_HARD_BLOCK";
-    rollingFeeRatio10?: number;
-    rollingFeeRatio20?: number;
-    rollingFeeRatio50?: number;
-    realizedGrossProfit?: number;
-    realizedGrossLoss?: number;
-    totalFees?: number;
-    feeAdjustedNetPnl?: number;
-    feeBreakerReason?: string;
-    feeBreakerReleaseCondition?: string;
     overtradingScore: number;
     isPaused: boolean;
     pauseType?: "NONE" | "SOFT" | "HARD";
@@ -275,13 +256,6 @@ export interface BotState {
     falseBreakoutRate?: number;
     volatilityFailureRate?: number;
     missedRunnerCount?: number;
-    runnerCaptureCount?: number;
-    prematureExitCount?: number;
-    microScalpExitBlockedCount?: number;
-    winnerLoserRatio?: number;
-    feeAdjustedPnl?: number;
-    allTimeGrossGain?: number;
-    allTimeGrossLoss?: number;
     postRallyContinuationScore?: number;
     recentEntryBias?: string;
     lastMissedRunner?: string;
@@ -376,6 +350,11 @@ export interface BotState {
     duplicateProtectionWarnings: number;
     protectionSyncHealth: string;
     lastProtectionSync?: number;
+    finalRouterAttemptsMap?: Record<string, number>;
+    skippedLowPriorityCandidates?: number;
+    sizingInvalidCooldownCount?: number;
+    highRiskPrepareCount?: number;
+    routerBlockCooldownCount?: number;
   };
   circuitBreakerHistory?: CircuitBreakerEvent[];
   missedRunnerTracking?: {
@@ -563,3 +542,4 @@ export interface CMCTrendIntelligence {
   narrativeHeat?: { name: string; score: number; trend: "STRENGTHENING" | "WEAKENING" | "EMERGING" | "FADING"; representativeSymbols: string[] }[];
   watchlist?: WatchlistAsset[];
 }
+

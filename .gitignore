@@ -1,7 +1,4 @@
 node_modules/
-.npm-cache/
-.bot_state_snapshot.json
-trades_history.json
 build/
 dist/
 coverage/

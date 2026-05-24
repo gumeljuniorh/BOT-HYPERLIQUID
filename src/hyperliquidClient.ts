@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { ethers } from "ethers";
 import { signL1Action } from "hyperliquid";
+import { botState } from "./state.js";
 
 export class HyperliquidClient {
   private wallet: ethers.Wallet | null = null;
@@ -42,7 +43,35 @@ export class HyperliquidClient {
     }
   }
 
-  async infoRequest(payload: any, retries = 3, delay = 1000): Promise<any> {
+  private requestCache = new Map<string, { timestamp: number; data: any }>();
+  private CACHE_DURATION_MS = 60000; // Cache meta requests longer, other high freq requests we can throttle
+
+  async infoRequest(payload: any, retries = 3, delay = 1000, cacheTimeMs = 5000): Promise<any> {
+    const cacheKey = JSON.stringify(payload);
+    const now = Date.now();
+    const cached = this.requestCache.get(cacheKey);
+
+    // Apply different cache times based on payload type
+    let effectiveCacheTime = cacheTimeMs;
+    if (payload.type === "meta" || payload.type === "metaAndAssetCtxs") {
+      effectiveCacheTime = 60000; // 1 min for static/heavy meta
+    } else if (payload.type === "clearinghouseState" || payload.type === "spotClearinghouseState" || payload.type === "userState" || payload.type === "openOrders" || payload.type === "userFills") {
+      effectiveCacheTime = 12000; // 12 seconds for states during normal loops (WSS covers live)
+    }
+
+    // If globally rate-limited, extend cache heavily
+    if (botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil) {
+       effectiveCacheTime = 60000; // 60s minimum backoff for everything
+       console.log(`[REST_BACKOFF_ACTIVE] Throttling infoRequest (${payload.type}) due to API budget constraint.`);
+    }
+
+    if (cached && now - cached.timestamp < effectiveCacheTime) {
+      return cached.data; // deduplicate/cache return
+    }
+
+    // Add API Budget logic: if we just hit 429, don't spam
+    // Not fully implemented but basic backoff happens in the catch
+
     for (let i = 0; i < retries; i++) {
         try {
           const res = await fetch(`${config.HYPERLIQUID_API_URL}/info`, {
@@ -59,7 +88,9 @@ export class HyperliquidClient {
           if (!res.ok && res.status >= 500) {
               throw new Error(`Server error: ${res.status}`);
           }
-          return await res.json();
+          const data = await res.json();
+          this.requestCache.set(cacheKey, { timestamp: now, data });
+          return data;
         } catch (err: any) {
           if (i === retries - 1) {
              console.error("infoRequest failed after retries", err);

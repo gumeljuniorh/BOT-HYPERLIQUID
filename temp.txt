@@ -1,0 +1,24 @@
+230:  for (const pos of botState.allPositions) {
+646:      for (const coin of Object.keys((botState as any).protectionByCoin)) {
+873:        for (const oid of Object.keys(botState.entryOrdersContext)) {
+899:    for (const o of restingEntryOrders) {
+928:      for (const pos of botState.allPositions) {
+969:    for (const [sym, price] of Object.entries(botState.markPrices)) {
+1040:    for (const pos of botState.allPositions) {
+1374:    for (const pos of botState.allPositions) {
+1379:      for (const o of activePosOrders) {
+1407:    for (const pos of botState.allPositions) {
+1482:    for (const sym of validUniverse) {
+1794:  for (const sym of validUniverse) {
+2674:  for (const opp of botState.scannerOpportunities) {
+2736:  for (const sym of validUniverse) {
+3220:  for (const [reason, count] of Object.entries(rejectionCounts)) {
+3405:    for (const sym of validUniverse) {
+4112:           for (const k of keys) {
+4753:            for (const pos of botState.allPositions) {
+5297:          for (const pos of botState.allPositions) {
+6735:  for (const oid of Object.keys(botState.entryOrdersContext)) {
+6757:      for (const pos of botState.allPositions) {
+6763:        for (const o of activePosOrders) {
+6793:      for (const pos of botState.allPositions) {
+6906:  for (const o of botState.activeOrders) {
