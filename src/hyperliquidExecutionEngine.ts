@@ -22,19 +22,17 @@ export class HyperliquidExecutionEngine {
   async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean) {
     const side = isBuy ? 'BUY' : 'SELL';
     console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly}`);
-    
-    // NEW: Add slot check for non-reduce-only orders (entry orders only)
-    if (!reduceOnly) {
-      if (!canOpenNewEntry()) {
-        console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
-        botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
-        return null;
-      }
-    } else {
-      // Reduce-only orders (TP/SL) bypass slot restrictions
-      console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only order allowed regardless of slot state`);
+
+    if (!reduceOnly && !canOpenNewEntry()) {
+      console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active. Reason=${botState.slotReductionReason || "UNKNOWN"} configured=${botState.configuredMaxPositions} effective=${botState.effectiveMaxPositions} used=${botState.usedPositions} available=${botState.availableSlots}`);
+      botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
+      return null;
     }
-    
+
+    if (reduceOnly) {
+      console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only protection/exit order allowed regardless of slot state.`);
+    }
+
     if (config.DRY_RUN) {
       // Simulate fill in bot state for dashboard awareness
       const oid = `MOCK-${Math.floor(Math.random() * 1000000)}`;
@@ -43,7 +41,7 @@ export class HyperliquidExecutionEngine {
       
       // Manually adjust botState for paper mode visualization
       if (!reduceOnly) {
-        botState.openPositions = 1;
+        botState.openPositions = Math.max(1, botState.openPositions || 0);
         botState.positionDetails = {
            coin: symbol,
            szi: isBuy ? sz.toString() : (-sz).toString(),
@@ -58,6 +56,7 @@ export class HyperliquidExecutionEngine {
         // Recalculate slots after position change
         calculatePositionSlots();
       }
+      calculatePositionSlots();
       return { status: "ok", oid };
     } else {
       // Real exchange request
@@ -100,7 +99,6 @@ export class HyperliquidExecutionEngine {
             botState.lastOrderId = status.resting.oid.toString();
             botState.lastFillPrice = px;
             botState.lastApiError = null;
-            // Recalculate slots after successful order
             if (!reduceOnly) {
               calculatePositionSlots();
             }
@@ -109,7 +107,6 @@ export class HyperliquidExecutionEngine {
             botState.lastOrderId = status.filled.oid.toString();
             botState.lastFillPrice = parseFloat(status.filled.avgPx);
             botState.lastApiError = null;
-            // Recalculate slots after fill
             calculatePositionSlots();
             return result;
           } else if (status.error) {

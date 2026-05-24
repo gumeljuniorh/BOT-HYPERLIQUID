@@ -515,6 +515,11 @@ function AppContent() {
     netProfitability: 0,
     maxDrawdown: 0
   };
+  const configuredMaxPositions = bot.configuredMaxPositions ?? bot.config?.maxOpenPositions ?? 3;
+  const effectiveMaxPositions = bot.effectiveMaxPositions ?? bot.maxAllowedPositions ?? configuredMaxPositions;
+  const usedPositions = bot.usedPositions ?? bot.openPositions ?? 0;
+  const availableSlots = bot.availableSlots ?? Math.max(0, effectiveMaxPositions - usedPositions);
+  const slotRestrictionReason = bot.slotReductionReason || bot.dynamicPositionLimitReason || "NONE";
 
   const blockerInfo = useMemo(() => {
     const b = bot.blocker;
@@ -1023,22 +1028,26 @@ function AppContent() {
                   <div className="flex justify-between items-center">
                     <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Open Positions</p>
                     <span className="text-[8px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-bold uppercase">
-                      Max: {bot.maxAllowedPositions || 3}
+                      Effective: {effectiveMaxPositions}
                     </span>
                   </div>
                   <div className="flex items-baseline justify-between">
                     <div className="flex items-baseline gap-1.5">
-                      <p className="text-xl font-black text-white">{bot.openPositions || 0} / 3</p>
+                      <p className="text-xl font-black text-white">{usedPositions} / {configuredMaxPositions}</p>
                       <span className="text-[10px] text-slate-400 font-bold">
-                        ({Math.max(0, (bot.maxAllowedPositions || 3) - (bot.openPositions || 0))} slots left)
+                        ({availableSlots} slots left)
                       </span>
                     </div>
                   </div>
-                  {bot.dynamicPositionLimitReason && (
-                    <div className="pt-1 border-t border-slate-900 text-[8px] text-slate-500 truncate" title={bot.dynamicPositionLimitReason}>
-                      Reason: <span className="text-slate-400 font-medium">{bot.dynamicPositionLimitReason}</span>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1 border-t border-slate-900 text-[8px] text-slate-500">
+                    <span>Configured: <strong className="text-slate-300">{configuredMaxPositions}</strong></span>
+                    <span>Effective: <strong className="text-slate-300">{effectiveMaxPositions}</strong></span>
+                    <span>Used: <strong className="text-slate-300">{usedPositions}</strong></span>
+                    <span>Available: <strong className="text-slate-300">{availableSlots}</strong></span>
+                    <div className="col-span-2 truncate" title={slotRestrictionReason}>
+                      Slot Restriction: <span className={cn("font-medium", bot.slotReductionIsHardSafety ? "text-rose-400" : "text-emerald-400")}>{slotRestrictionReason}</span>
                     </div>
-                  )}
+                  </div>
                 </div>
                 {/* Available Margin */}
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-[#8A4FFF]/20">
@@ -1108,6 +1117,9 @@ function AppContent() {
                   <p className={cn("text-xs font-black uppercase mt-1", bot.openPositions === 0 || bot.protectionStatus === "CONFIRMED" ? "text-emerald-400" : "text-rose-400")}>
                     {bot.openPositions === 0 ? "Ready" : bot.protectionReadiness || bot.protectionStatus || "Unknown"}
                   </p>
+                  <p className="text-[8px] text-slate-500 truncate" title={bot.telemetry?.currentProtectionIssue || "No active issue"}>
+                    TP {bot.telemetry?.activeTpCount ?? 0} / SL {bot.telemetry?.activeSlCount ?? 0} · {bot.telemetry?.currentProtectionIssue || "No active issue"}
+                  </p>
                 </div>
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
                   <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">All-Time Gain / Loss</p>
@@ -1138,6 +1150,13 @@ function AppContent() {
                   <SnapshotMetric label="Expectancy" value={bot.analytics?.expectancyAfterFees !== undefined ? `$${bot.analytics.expectancyAfterFees.toFixed(2)}` : "$0.00"} color={(bot.analytics?.expectancyAfterFees || 0) >= 0 ? "emerald" : "rose"} />
                   <SnapshotMetric label="Best Trade" value={bot.analytics?.largestWin !== undefined ? `+$${bot.analytics.largestWin.toFixed(2)}` : "$0.00"} color="emerald" />
                   <SnapshotMetric label="Worst Trade" value={bot.analytics?.largestLoss !== undefined ? `-$${Math.abs(bot.analytics.largestLoss).toFixed(2)}` : "$0.00"} color="rose" />
+                  <SnapshotMetric label="Average Winner" value={`$${(bot.analytics?.avgWin || 0).toFixed(2)}`} color="emerald" />
+                  <SnapshotMetric label="Average Loser" value={`$${Math.abs(bot.analytics?.avgLoss || 0).toFixed(2)}`} color="rose" />
+                  <SnapshotMetric label="Winner/Loser" value={`${(bot.analytics?.winnerLoserRatio || 0).toFixed(2)}x`} color={(bot.analytics?.winnerLoserRatio || 0) >= 1 ? "emerald" : "rose"} />
+                  <SnapshotMetric label="Avg Hold" value={formatDuration(bot.analytics?.averageTradeDuration || 0)} />
+                  <SnapshotMetric label="Runner Captures" value={bot.analytics?.runnerCaptureCount || 0} color="emerald" />
+                  <SnapshotMetric label="Premature Blocks" value={bot.analytics?.prematureExitCount || 0} />
+                  <SnapshotMetric label="Micro-Scalp Blocks" value={bot.analytics?.microScalpExitBlockedCount || 0} />
                 </div>
               </div>
             )}

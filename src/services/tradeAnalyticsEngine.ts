@@ -78,6 +78,11 @@ export class TradeAnalyticsEngine {
     const averageTradeDuration = durations.length > 0
       ? durations.reduce((acc, d) => acc + d, 0) / durations.length
       : 0;
+    const winnerLoserRatio = avgLoss < 0 ? avgWin / Math.abs(avgLoss) : (avgWin > 0 ? 999 : 0);
+    const runnerCaptureCount = confirmedExits.filter(t => t.runnerCaptureActivated || /RUNNER|EXTENDED/i.test(t.exitReason || "")).length;
+    const prematureExitCount = confirmedExits.reduce((acc, t) => acc + (t.prematureExitBlockedCount || 0), 0) +
+      confirmedExits.filter(t => /PREMATURE|MICRO_SCALP|TINY_PROFIT|TIME_LIMIT_EXCEEDED/i.test(t.exitReason || "") && (t.netPnl || 0) > 0).length;
+    const microScalpExitBlockedCount = confirmedExits.reduce((acc, t) => acc + (t.microScalpExitBlockedCount || 0), 0);
 
     const regimeStats: Record<string, { wins: number; losses: number; winRate: number }> = {};
     const regimeDetailedStats: Record<string, { wins: number; losses: number; winRate: number; netPnl: number; fees: number; averageDuration: number; durationsList: number[] }> = {};
@@ -328,6 +333,10 @@ export class TradeAnalyticsEngine {
       totalLosses: losses.length,
       avgWin,
       avgLoss,
+      winnerLoserRatio,
+      runnerCaptureCount,
+      prematureExitCount,
+      microScalpExitBlockedCount,
       largestWin,
       largestLoss,
       cumulativeFees,
@@ -395,6 +404,10 @@ export class TradeAnalyticsEngine {
       totalLosses: 0,
       avgWin: 0,
       avgLoss: 0,
+      winnerLoserRatio: 0,
+      runnerCaptureCount: 0,
+      prematureExitCount: 0,
+      microScalpExitBlockedCount: 0,
       largestWin: 0,
       largestLoss: 0,
       cumulativeFees: 0,

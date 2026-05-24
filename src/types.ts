@@ -80,6 +80,12 @@ export interface BotState {
   isProgrammaticClosing?: boolean;
   maxAllowedPositions?: number;
   dynamicPositionLimitReason?: string;
+  configuredMaxPositions?: number;
+  effectiveMaxPositions?: number;
+  usedPositions?: number;
+  availableSlots?: number;
+  slotReductionReason?: string;
+  slotReductionIsHardSafety?: boolean;
   operationalState?: OperationalState;
   riskProfile?: RiskProfile;
   previousPhase?: string | null;
@@ -175,6 +181,9 @@ export interface BotState {
     isLateButTradeable?: boolean;
     requiresTightTrailing?: boolean;
     isChopRecovery?: boolean;
+    runnerCaptureModeActive?: boolean;
+    microScalpExitBlockedCount?: number;
+    prematureExitBlockedCount?: number;
   };
   protectionStatus?: "CONFIRMED" | "MISSING" | "REPAIRING" | "FAILED_EMERGENCY_CLOSE_REQUIRED";
   protectionReadiness?: "PROTECTION_READY_FOR_EXECUTION" | "TP_SL_REPAIR_COMPLETED" | "REPAIRING" | "FAILED" | null;
@@ -239,6 +248,10 @@ export interface BotState {
     lessons: string[];
     updatedAt: number;
     averageTradeDuration?: number;
+    winnerLoserRatio?: number;
+    runnerCaptureCount?: number;
+    prematureExitCount?: number;
+    microScalpExitBlockedCount?: number;
     winLossByMarketRegime?: Record<string, { wins: number; losses: number; winRate: number }>;
     bestRegime?: string;
     worstRegime?: string;
@@ -345,6 +358,11 @@ export interface BotState {
     duplicateProtectionWarnings: number;
     protectionSyncHealth: string;
     lastProtectionSync?: number;
+    currentProtectionIssue?: string;
+    repairRequired?: boolean;
+    repairInProgress?: boolean;
+    lastRepairAction?: string;
+    lastRepairCompletedAt?: number;
   };
   circuitBreakerHistory?: CircuitBreakerEvent[];
   missedRunnerTracking?: {
@@ -425,6 +443,9 @@ export interface TradeLog {
   unrealizedMaxDrawdown?: number;
   maxFavorableMove?: number;
   maxAdverseMove?: number;
+  microScalpExitBlockedCount?: number;
+  prematureExitBlockedCount?: number;
+  runnerCaptureActivated?: boolean;
   duration?: number;
   entryReason?: string;
   exitReason?: string;
