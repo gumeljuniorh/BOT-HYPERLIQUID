@@ -177,13 +177,34 @@ export function getDynamicMaxPositions(): { limit: number; reason: string } {
   calculatePositionSlots();
   
   // Backwards compatibility for UI or older code that might still check this before we fully migrate
-  botState.maxAllowedPositions = botState.effectiveMaxPositions || 3;
+  botState.maxAllowedPositions = botState.effectiveMaxPositions ?? config.MAX_OPEN_POSITIONS;
   botState.dynamicPositionLimitReason = botState.slotReductionReason || "NONE";
   
   return { 
-    limit: botState.effectiveMaxPositions || 3, 
+    limit: botState.effectiveMaxPositions ?? config.MAX_OPEN_POSITIONS,
     reason: botState.slotReductionReason || "NONE" 
   };
+}
+
+function isMultiPositionPhase(): boolean {
+  return botState.phase === "PHASE_1_CONTROLLED_LIVE" || botState.phase === "PHASE_2_ADAPTIVE_EXECUTION";
+}
+
+function normalizeEntryBlockReason(reason: string): string {
+  if (reason.includes("MAX_POSITION")) return "MAX_OPEN_POSITIONS";
+  if (reason.includes("COLLATERAL") || reason.includes("MARGIN")) return "BALANCE_RESERVE";
+  if (reason.includes("EXPOSURE")) return "MAX_EXPOSURE";
+  if (reason.includes("COOLDOWN") || reason.includes("NO_TRADE") || reason.includes("OVERTRADING") || reason.includes("REVERSE_LOCK")) return "COOLDOWN";
+  if (reason.includes("MIN_NOTIONAL") || reason.includes("TOO_SMALL") || reason.includes("POSITION_SIZE")) return "MIN_NOTIONAL";
+  if (reason.includes("CONFIDENCE") || reason.includes("LOW_SIGNAL") || reason.includes("NO_TRADE_SIGNAL") || reason.includes("NO_DIRECTIONAL_EDGE")) return "LOW_SIGNAL_SCORE";
+  if (reason.includes("API_RATE") || reason.includes("API_BUDGET") || reason.includes("WSS") || reason.includes("API_NOT")) return "API_BUDGET";
+  if (reason.includes("VALIDATION") || reason.includes("TP_SL") || reason.includes("ORDER_VALIDATION")) return "EXECUTION_VALIDATION";
+  return reason || "UNKNOWN";
+}
+
+function logEntryBlocked(symbol: string, reason: string, detail = ""): void {
+  const normalized = normalizeEntryBlockReason(reason);
+  console.log(`[ENTRY_BLOCKED] symbol=${symbol}, reason=${normalized}, raw=${reason}${detail ? `, ${detail}` : ""}`);
 }
 
 export async function programmaticClosePosition(sym: string, reason: string): Promise<boolean> {
@@ -330,7 +351,6 @@ async function verifyProtectionOrders() {
     }
 
     if (needsExchangeUpdate) {
-      allPositionsProtected = false;
       const { executionEngine } = await import("./hyperliquidExecutionEngine.js");
       let success = false;
       
@@ -346,11 +366,17 @@ async function verifyProtectionOrders() {
           if (perCoinProtection.isTrailingActive) perCoinProtection.trailingStopPrice = targetSl;
           else perCoinProtection.slPrice = targetSl;
         }
+        hasTpExchange = true;
+        hasSlExchange = true;
         console.log(`[PROTECTION_SYNCED] Protective limits placed/updated successfully for ${sym}.`);
+        console.log(`[TP_SL_REPAIR_COMPLETED] ${sym} TP/SL repair completed successfully.`);
+        console.log(`[PROTECTION_READY_FOR_EXECUTION] ${sym} protection is ready; additional slots may be evaluated.`);
       } else if (!hasTpExchange || !hasSlExchange) {
         if (botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil) {
              console.warn(`[TP_SL_REPAIR_DEFERRED] API budget exhausted. Deferring TP/SL repair until rate limit clears. Position may temporarily lack exchange protection.`);
+             allPositionsProtected = false;
         } else {
+            allPositionsProtected = false;
             anyRepairFailed = true;
             console.error(`[EMERGENCY_CLOSE_TP_SL_MISSING] Failed to repair TP/SL for ${sym}. Executing emergency position close.`);
             const isExitSuccess = await executionEngine.placeOrder(
@@ -866,15 +892,16 @@ export async function syncAccountState() {
       }
     }
 
-    // Ghost position detection (Reconciliation Check) - trigger only if more than 1 total
-    // Phase 2 allows multiple positions
+    // Ghost position detection (Reconciliation Check) - trigger only if configured max is breached.
+    // Conservative Phase 1 and adaptive Phase 2 both allow configured multi-position operation.
+    calculatePositionSlots();
+    const configuredMaxForReconciliation = botState.config?.maxOpenPositions ?? config.MAX_OPEN_POSITIONS;
     if (
-      openPositionsCount > 1 &&
-      botState.phase !== "CIRCUIT_BREAKER_ACTIVE" &&
-      botState.phase !== "PHASE_2_ADAPTIVE_EXECUTION"
+      openPositionsCount > configuredMaxForReconciliation &&
+      botState.phase !== "CIRCUIT_BREAKER_ACTIVE"
     ) {
       console.error(
-        `[GHOST_POSITION] Multiple open positions detected. Max 1 allowed! Total open: ${openPositionsCount}`,
+        `[GHOST_POSITION] Position count exceeded configured max. Max allowed: ${configuredMaxForReconciliation}. Total open: ${openPositionsCount}`,
       );
       triggerCircuitBreaker("CIRCUIT_BREAKER_ACTIVE: MULTIPLE_POSITIONS_DETECTED");
       botState.validationStatus = "VALIDATION_FAILED";
@@ -1378,6 +1405,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
   });
 
   const isPhase2 = botState.phase === "PHASE_2_ADAPTIVE_EXECUTION";
+  const multiPositionMode = isMultiPositionPhase();
   
   // Rule 3: Dynamic max positions checks
   const now = Date.now();
@@ -1461,8 +1489,10 @@ async function handleTradingLogic(isEmergencyMode = false) {
     canEnterNew = true;
     console.log(`[MULTI_POSITION_SLOT_AVAILABLE] Slot available in execution pipeline. Open Positions: ${botState.openPositions} / ${limit} (Max: ${limit}). Reason: ${dynamicLimitObj.reason}`);
   } else {
-    canEnterNew = true;
-    blockerReason = "NONE";
+    canEnterNew = false;
+    blockerReason = "MAX_OPEN_POSITIONS";
+    botState.blocker = "MAX_POSITIONS_REACHED";
+    logEntryBlocked(botState.activeSymbol, blockerReason, `openPositions=${botState.openPositions}, maxOpenPositions=${limit}, availableSlots=${botState.availableSlots || 0}`);
   }
 
   // Dynamic portfolio limits: do not allow multiple positions if it breaks 30%–35% free collateral rules
@@ -1487,6 +1517,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
       if (botState.openPositions < limit) {
         canEnterNew = false;
         blockerReason = "INSUFFICIENT_PROJECTED_FREE_COLLATERAL";
+        botState.blocker = blockerReason;
+        logEntryBlocked(botState.activeSymbol, "BALANCE_RESERVE", `projectedFreeCollateralPct=${projectedFreeCollateralPctAfterNew.toFixed(1)}, requiredFreeCollateralPct=${requiredFreeCollateralPctAfterNew}`);
       }
     } else {
       console.log(`[MULTI_POSITION_ALLOWED] Gate passed for setup evaluation.`);
@@ -1496,6 +1528,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
   if (botState.openPositions > 0 && botState.protectionStatus && botState.protectionStatus !== "CONFIRMED") {
     canEnterNew = false;
     botState.blocker = `ENTRY_BLOCKED_PROTECTION_${botState.protectionStatus}`;
+    logEntryBlocked(botState.activeSymbol, botState.blocker);
   }
 
   if (canEnterNew) {
@@ -3030,7 +3063,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
       } else if (!botState.apiConnected) {
         blockerCode = "ENTRY_ENGINE_DISABLED";
       } else {
-        const exposureAllowed = botState.openPositions < 2 || (botState.openPositions < 4 && dynamicMoreThanTwoAllowed);
+        const exposureAllowed = botState.openPositions < limit && (botState.openPositions === 0 || dynamicMoreThanTwoAllowed);
         if (!exposureAllowed) {
             blockerCode = "MAX_POSITIONS_REACHED";
         }
@@ -3114,7 +3147,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
                   targetExposure *= 0.5;
                   setupLeverage = Math.min(1, setupLeverage);
                   
-                  const maxPosLimit = botState.participationRecoveryStatus === "PARTICIPATION_PARALYSIS_RECOVERY_ACTIVE" ? 2 : 1;
+                  const maxPosLimit = botState.participationRecoveryStatus === "PARTICIPATION_PARALYSIS_RECOVERY_ACTIVE" ? Math.min(limit, 2) : limit;
                   if (botState.openPositions >= maxPosLimit) {
                     blockerCode = "MAX_POSITIONS_REACHED";
                   }
@@ -3290,6 +3323,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           opp.rejectionReason = null;
         } else {
           const isExpectedPrecheck = blockerCode.startsWith("TP_SL_PRECHECK_FAILED") || ["HARD_DRAWDOWN_PAUSE_ACTIVE", "SOFT_DRAWDOWN_PAUSE_ACTIVE", "MAX_POSITIONS_REACHED", "WSS_INSTABILITY", "API_NOT_VERIFIED", "PHASE_NOT_ACTIVE", "ENTRY_ENGINE_DISABLED", "NOT_BEST_SIGNAL_SELECTED"].includes(blockerCode);
+          logEntryBlocked(sym, blockerCode, `openPositions=${botState.openPositions}, maxOpenPositions=${limit}, availableSlots=${botState.availableSlots || 0}`);
           if (!isExpectedPrecheck) {
              console.log(`MARKET_REJECTED_WITH_REASON: ${sym} rejected due to ${blockerCode}.`);
           }
@@ -3368,6 +3402,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
     }
   }
   pAudit.dominantRejectionReason = dominantReason;
+  calculatePositionSlots();
+  const signalQualifiedCount = opportunities.filter((opp) => {
+    const reason = opp.rejectionReason || "";
+    return (opp.confidence || 0) > 0 && opp.bias !== "NONE" && !["LOW_CONFIDENCE", "NO_TRADE_SIGNAL", "NO_DIRECTIONAL_EDGE"].includes(reason);
+  }).length;
+  const riskQualifiedCount = opportunities.filter((opp) => {
+    const reason = opp.rejectionReason || "";
+    return !reason || !/(DRAWDOWN|COLLATERAL|MARGIN|MAX_POSITIONS|API_NOT_VERIFIED|WSS|TP_SL|PROTECTION|POSITION_SIZE|TOO_SMALL|MIN_NOTIONAL)/.test(reason);
+  }).length;
+  const slotFilteredCount = opportunities.filter((opp) => (opp.rejectionReason || "").includes("MAX_POSITIONS")).length;
+  const executableCount = opportunities.filter((opp) => opp.eligibility === "ELIGIBLE").length;
+  console.log(`[SCAN_SUMMARY] scanned=${opportunities.length}, signalQualified=${signalQualifiedCount}, riskQualified=${riskQualifiedCount}, executable=${executableCount}, availableSlots=${botState.availableSlots || 0}, beforeFilters=${validUniverse.length}, afterSignalFilters=${signalQualifiedCount}, afterRiskFilters=${riskQualifiedCount}, afterPositionSlotFilters=${Math.max(0, riskQualifiedCount - slotFilteredCount)}, finalExecutableCandidates=${executableCount}`);
 
   // Detect Participation Paralysis and Cooldown Escape
   const timeSinceLastTrade = Date.now() - (pAudit.lastTradeTime || Date.now());
@@ -3718,7 +3764,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
       abortReasons.push("Insufficient margin");
     if (!botState.wssConnected) abortReasons.push("Websocket disconnected");
     if (!botState.apiConnected) abortReasons.push("Order router unavailable");
-    if (botState.openPositions > 0) abortReasons.push("Position already open");
+    calculatePositionSlots();
+    if ((botState.availableSlots || 0) <= 0) abortReasons.push("No available position slots");
+    if ((botState.allPositions || []).some((p: any) => p.coin === botState.activeSymbol)) {
+      abortReasons.push("Same-symbol position already open");
+    }
 
     if (abortReasons.length > 0) {
       console.warn(`[TEST TRADE ABORTED] Reasons: ${abortReasons.join(", ")}`);
@@ -4566,16 +4616,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
         }
         
         const collateralHealthy = botState.accountEquity > 10;
-        const exposureAllowed = botState.openPositions < 2 || (botState.openPositions < 4 && dynamicMoreThanTwoAllowed);
+        const exposureAllowed = botState.openPositions < limit && (botState.openPositions === 0 || dynamicMoreThanTwoAllowed);
 
         if (!collateralHealthy) {
           console.log(`[ENTRY_FILTER] Trade blocked: Free collateral insufficient for Phase 2.`);
           botState.blocker = "INSUFFICIENT_COLLATERAL";
+          logEntryBlocked(botState.activeSymbol, "BALANCE_RESERVE", `accountEquity=${botState.accountEquity.toFixed(2)}`);
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
         if (!exposureAllowed) {
           console.log(`[ENTRY_FILTER] Trade blocked: Phase 2 exposure limits reached.`);
           botState.blocker = "EXPOSURE_LIMITS_REACHED";
+          logEntryBlocked(botState.activeSymbol, "MAX_EXPOSURE", `openPositions=${botState.openPositions}, maxOpenPositions=${limit}, availableSlots=${botState.availableSlots || 0}`);
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
       }
@@ -4923,16 +4975,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
       // 7. Accidental position aggregation protection & No stacking same symbol positions (Rule 4 / Requirement 3 & 13)
       if (
-        !isPhase2 &&
+        !multiPositionMode &&
         (botState.openPositions > 0 || botState.positionDetails)
       ) {
         console.log(
           "[ENTRY_FILTER] Blocked: ACCIDENTAL_DUPLICATE_STACKING protection active.",
         );
+        logEntryBlocked(botState.activeSymbol, "MAX_OPEN_POSITIONS", "single-position phase active");
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
       }
 
-      if (isPhase2) {
+      if (multiPositionMode) {
         const dynamicLimitObj = getDynamicMaxPositions();
         const limit = dynamicLimitObj.limit;
 
@@ -5031,6 +5084,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log(
             `[ENTRY_FILTER] Blocked: ACCIDENTAL_DUPLICATE_STACKING or pending entry order for ${botState.activeSymbol}.`,
           );
+          logEntryBlocked(botState.activeSymbol, "COOLDOWN", "same-symbol position or pending entry already exists");
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
 
@@ -5046,6 +5100,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           );
           botState.blocker = `INSUFFICIENT_FREE_COLLATERAL: Est. Free ${((botState.availableMargin / botState.accountEquity) * 100).toFixed(1)}% < 30%`;
           (botState as any).wasInsufficientCollateral = true;
+          logEntryBlocked(botState.activeSymbol, "BALANCE_RESERVE", `availableMargin=${botState.availableMargin.toFixed(2)}, requiredBuffer=${requiredSafetyBuffer.toFixed(2)}`);
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
 
@@ -5059,6 +5114,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
             `[ENTRY_FILTER] Blocked: Free collateral below 35% preferred safety target for scaling at limit of ${limit}.`,
           );
           botState.blocker = "BELOW_PREFERRED_SAFETY_TARGET";
+          logEntryBlocked(botState.activeSymbol, "BALANCE_RESERVE", `availableMargin=${botState.availableMargin.toFixed(2)}, preferredTarget=${preferredSafetyTarget.toFixed(2)}`);
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
       }
@@ -5080,7 +5136,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
       }
 
-      if (riskManager.checkRisk()) {
+      if (riskManager.checkRisk(botState.activeSymbol)) {
         const isBuy = signal.direction === "LONG";
 
         let baseExposure = botState.config.maxExposure;
@@ -5143,7 +5199,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
         let progressiveLeverage = 2; // Preferred default
 
-        if (isPhase2) {
+        if (multiPositionMode) {
           console.log(`[REAL_TIME_AVAILABILITY_CHECK] Active positions: ${botState.openPositions}, Conf: ${conf}, Regime: ${signal.marketRegime}`);
           
           const dynamicLimitObj = getDynamicMaxPositions();
@@ -5433,9 +5489,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
         // Apply final absolute portfolio constraints
         targetExposure = Math.min(targetExposure, botState.accountEquity * 0.95);
 
-        if (isPhase2) {
+        if (multiPositionMode) {
           console.log(
-            `[PHASE_2_TELEMETRY] Adaptive Sizing: TargetExposure=$${targetExposure.toFixed(2)} (Base: $${baseExposure.toFixed(2)}, Reductions: ${totalReductionPct.toFixed(1)}%), Leverage=${setupLeverage}x (Conf: ${conf}, Momentum: ${signal.momentumScore}, Volatility: ${signal.volatilityScore})`,
+            `[MULTI_POSITION_SIZING_TELEMETRY] TargetExposure=$${targetExposure.toFixed(2)} (Base: $${baseExposure.toFixed(2)}, Reductions: ${totalReductionPct.toFixed(1)}%), Leverage=${setupLeverage}x (Conf: ${conf}, Momentum: ${signal.momentumScore}, Volatility: ${signal.volatilityScore})`,
           );
         }
 
@@ -5892,7 +5948,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
             };
           }
 
-          if (isPhase2) {
+          if (multiPositionMode) {
              const projUsed = roundedBaseSize * markPrice / setupLeverage;
              const newAvail = botState.availableMargin - projUsed;
              const marginPct = botState.accountEquity > 0 ? (newAvail / botState.accountEquity) * 100 : 0;
@@ -6030,6 +6086,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
       const minSzNot = (astMeta?.minSz || 0) * (botState.markPrice || 0);
       const reqNotional = Math.max(protocolMin, minSzNot);
       const estFreeCollateralPct = botState.accountEquity > 0 ? ((botState.availableMargin -_targetExposure/_setupLeverage) / botState.accountEquity) * 100 : 0;
+      const finalRouterLimit = getDynamicMaxPositions().limit;
 
       console.log(`FINAL_ORDER_ROUTER_TRACE:
 * symbol: ${_sym}
@@ -6040,7 +6097,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
 * canEnterNew: ${canEnterNew}
 * current blocker: ${botState.blocker || "NONE"}
 * open positions: ${botState.openPositions}
-* max positions: ${isPhase2 ? "Dynamic (>2)" : "1"}
+* max positions: ${multiPositionMode ? finalRouterLimit : 1}
 * resting orders: ${botState.activeOrders?.length || 0}
 * total equity: $${botState.accountEquity.toFixed(2)}
 * available margin: $${botState.availableMargin.toFixed(2)}
@@ -7397,7 +7454,7 @@ async function loop() {
   }
 
   if (!config.DRY_RUN) {
-    if (!riskManager.checkRisk()) {
+    if (!riskManager.checkRisk(botState.activeSymbol)) {
       // Risk manager sets the blocker string internally if it fails
     } else {
       if (botState.phase === "VALIDATION_READY") {
@@ -7435,7 +7492,8 @@ export async function startBotEngine() {
   console.log("Starting Bot Engine...");
   console.log("[CLOUD_RUNTIME_INITIALIZED] Bot engine initialized as a singleton.");
   console.log(`[EXECUTION_MODE_CONFIRMED] ${config.DRY_RUN ? "DRY_RUN" : "LIVE"} mode active. Secrets are not printed.`);
-  console.log(`[PHASE_1_SAFETY_CONFIG] Conservative controls: maxOpenPositions=${botState.config.maxOpenPositions || 3}, minEntrySize=$${botState.config.minEntrySize || 40}, dailyLossLimitPct=${botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT}, balanceReservePct=${botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT}, microScalpMode=${botState.config.microScalpModeEnabled ? "ENABLED" : "DISABLED"}.`);
+  console.log(`[CONFIG] MAX_OPEN_POSITIONS=${botState.config.maxOpenPositions ?? config.MAX_OPEN_POSITIONS}`);
+  console.log(`[PHASE_1_SAFETY_CONFIG] Conservative controls: maxOpenPositions=${botState.config.maxOpenPositions ?? config.MAX_OPEN_POSITIONS}, minEntrySize=$${botState.config.minEntrySize || 40}, dailyLossLimitPct=${botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT}, balanceReservePct=${botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT}, microScalpMode=${botState.config.microScalpModeEnabled ? "ENABLED" : "DISABLED"}.`);
 
   // Set pending status explicitly on startup
   botState.validationStatus = "PENDING";

@@ -38,8 +38,9 @@ export class HyperliquidExecutionEngine {
     
     // NEW: Add slot check for non-reduce-only orders (entry orders only)
     if (!reduceOnly) {
-      if (!canOpenNewEntry()) {
+      if (!canOpenNewEntry(symbol)) {
         console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
+        console.log(`[ENTRY_BLOCKED] symbol=${symbol}, reason=MAX_OPEN_POSITIONS, openPositions=${botState.usedPositions || botState.openPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || botState.config?.maxOpenPositions || 3}, availableSlots=${botState.availableSlots || 0}`);
         botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
         return null;
       }
@@ -56,18 +57,22 @@ export class HyperliquidExecutionEngine {
       
       // Manually adjust botState for paper mode visualization
       if (!reduceOnly) {
-        botState.openPositions = (botState.openPositions || 0) + 1;
-        botState.positionDetails = {
+        const simulatedPosition = {
            coin: symbol,
            szi: isBuy ? sz.toString() : (-sz).toString(),
            entryPx: px.toString(),
            unrealizedPnl: "0"
         };
+        botState.positionDetails = simulatedPosition;
+        const otherPositions = (botState.allPositions || []).filter((p: any) => p.coin !== symbol);
+        botState.allPositions = [...otherPositions, simulatedPosition];
+        botState.openPositions = botState.allPositions.length;
         // Recalculate slots after position change
         calculatePositionSlots();
       } else {
-        botState.openPositions = Math.max(0, (botState.openPositions || 0) - 1);
-        botState.positionDetails = null;
+        botState.allPositions = (botState.allPositions || []).filter((p: any) => p.coin !== symbol);
+        botState.openPositions = botState.allPositions.length;
+        botState.positionDetails = botState.allPositions[0] || null;
         // Recalculate slots after position change
         calculatePositionSlots();
       }
@@ -229,6 +234,35 @@ export class HyperliquidExecutionEngine {
 
     if (config.DRY_RUN) {
       console.log(`[DRY_RUN] Placed TP/SL for ${symbol}. TP: ${tpPrice}, SL: ${slPrice}`);
+      const existingNonProtectionOrders = (botState.activeOrders || []).filter((o: any) => !(o.coin === symbol && o.reduceOnly));
+      const protectionOrders: any[] = [];
+      if (tpPrice !== null && tpPrice !== undefined) {
+        protectionOrders.push({
+          oid: `MOCK-TP-${symbol}-${Date.now()}`,
+          coin: symbol,
+          reduceOnly: true,
+          isTrigger: false,
+          px: tpPrice.toString(),
+          limitPx: tpPrice.toString(),
+          sz: Math.abs(sz).toString()
+        });
+      }
+      protectionOrders.push({
+        oid: `MOCK-SL-${symbol}-${Date.now()}`,
+        coin: symbol,
+        reduceOnly: true,
+        isTrigger: true,
+        triggerPx: slPrice.toString(),
+        sz: Math.abs(sz).toString()
+      });
+      botState.activeOrders = [...existingNonProtectionOrders, ...protectionOrders];
+      botState.telemetry = {
+        ...(botState.telemetry || {}),
+        activeTpCount: tpPrice !== null && tpPrice !== undefined ? 1 : 0,
+        activeSlCount: 1,
+        duplicateProtectionWarnings: botState.telemetry?.duplicateProtectionWarnings || 0,
+        protectionSyncHealth: "HEALTHY"
+      };
       return true;
     }
     

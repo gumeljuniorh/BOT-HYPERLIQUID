@@ -19,8 +19,9 @@ export const config = {
   HYPERLIQUID_API_WALLET: process.env.HYPERLIQUID_API_WALLET || "0xdaae5d2bffa4b090db68950c1d5f3245cb786711",
   HYPERLIQUID_API_URL: process.env.HYPERLIQUID_API_URL && process.env.HYPERLIQUID_API_URL.startsWith('http') ? process.env.HYPERLIQUID_API_URL : "https://api.hyperliquid.xyz",
   HYPERLIQUID_WS_URL: process.env.HYPERLIQUID_WS_URL && process.env.HYPERLIQUID_WS_URL.startsWith('ws') ? process.env.HYPERLIQUID_WS_URL : "wss://api.hyperliquid.xyz/ws",
-  DRY_RUN: false, // Force Live mode as requested
+  DRY_RUN: boolFromEnv("DRY_RUN", true),
   PHASE_ONE_CONSERVATIVE: boolFromEnv("PHASE_ONE_CONSERVATIVE", true),
+  MAX_OPEN_POSITIONS: Math.max(1, Math.floor(numFromEnv("MAX_OPEN_POSITIONS", 3))),
   API_BUDGET_ENABLED: boolFromEnv("API_BUDGET_ENABLED", true),
   REST_PRESSURE_DEGRADED_MODE: boolFromEnv("REST_PRESSURE_DEGRADED_MODE", true),
   API_BUDGET_WINDOW_MS: numFromEnv("API_BUDGET_WINDOW_MS", 60_000),

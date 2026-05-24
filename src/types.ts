@@ -83,6 +83,7 @@ export interface BotState {
   configuredMaxPositions?: number;
   effectiveMaxPositions?: number;
   usedPositions?: number;
+  pendingEntryCount?: number;
   availableSlots?: number;
   slotReductionReason?: string;
   slotReductionIsHardSafety?: boolean;
