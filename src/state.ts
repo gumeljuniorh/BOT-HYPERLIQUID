@@ -76,7 +76,28 @@ export const botState: BotState = {
     maxExposure: 40,
     leverage: 2,
     stopLossPct: 1.2,
-    takeProfitPct: 3.0
+    takeProfitPct: 3.0,
+    minEntrySize: 40,
+    maxOpenPositions: 3,
+    dailyLossLimitPct: config.DAILY_LOSS_LIMIT_PCT,
+    balanceReservePct: config.BALANCE_RESERVE_PCT,
+    microScalpModeEnabled: config.MICRO_SCALP_MODE_ENABLED
+  },
+  apiBudget: {
+    enabled: config.API_BUDGET_ENABLED,
+    degradedMode: false,
+    throttleReason: "NONE",
+    restRequestsInWindow: 0,
+    restBudgetLimit: config.API_MAX_REST_PER_MIN,
+    executionRequestsPerMin: 0,
+    protectionRequestsPerMin: 0,
+    tpSlRequestsPerMin: 0,
+    scannerRequestsPerMin: 0,
+    accountRequestsPerMin: 0,
+    metadataRequestsPerMin: 0,
+    cacheHits: 0,
+    blockedRequests: 0,
+    lastUpdated: Date.now()
   },
   protection: {
     tpPrice: null,

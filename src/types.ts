@@ -30,6 +30,10 @@ export interface BotConfig {
   stopLossPct: number;
   takeProfitPct: number;
   minEntrySize?: number;
+  maxOpenPositions?: number;
+  dailyLossLimitPct?: number;
+  balanceReservePct?: number;
+  microScalpModeEnabled?: boolean;
 }
 
 export interface ScannerOpportunity {
@@ -92,6 +96,22 @@ export interface BotState {
   apiConnected: boolean;
   wssConnected: boolean;
   apiRateLimitUntil?: number;
+  apiBudget?: {
+    enabled: boolean;
+    degradedMode: boolean;
+    throttleReason: string;
+    restRequestsInWindow: number;
+    restBudgetLimit: number;
+    executionRequestsPerMin: number;
+    protectionRequestsPerMin: number;
+    tpSlRequestsPerMin: number;
+    scannerRequestsPerMin: number;
+    accountRequestsPerMin: number;
+    metadataRequestsPerMin: number;
+    cacheHits: number;
+    blockedRequests: number;
+    lastUpdated: number;
+  };
   routerBlockCooldowns?: Record<string, number>;
   positionSizeInvalidCooldowns?: Record<string, number>;
   executionAttemptsMap?: Record<string, number>;
@@ -542,4 +562,3 @@ export interface CMCTrendIntelligence {
   narrativeHeat?: { name: string; score: number; trend: "STRENGTHENING" | "WEAKENING" | "EMERGING" | "FADING"; representativeSymbols: string[] }[];
   watchlist?: WatchlistAsset[];
 }
-

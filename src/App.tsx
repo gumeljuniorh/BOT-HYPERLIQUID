@@ -953,6 +953,7 @@ function AppContent() {
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono">
                 <HealthIndicator label="WSS" status={bot.wssConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="API" status={bot.apiConnected ? "Healthy" : "Critical"} />
+                <HealthIndicator label="REST Budget" status={bot.apiBudget?.degradedMode ? "Warning" : "Healthy"} />
                 <HealthIndicator label="Margin" status={bot.availableMargin >= 40 ? "Healthy" : bot.availableMargin >= 20 ? "Warning" : "Critical"} />
                 <HealthIndicator label="Protection Health" status={bot.openPositions === 0 ? "Healthy" : (bot.protectionStatus === "CONFIRMED" ? "Healthy" : "Warning")} />
                 {isAdvancedMode && <HealthIndicator label="Learning Engine" status="Healthy" />}
@@ -1057,6 +1058,15 @@ function AppContent() {
                       </p>
                     </div>
                   </>
+                )}
+                {isAdvancedMode && (
+                  <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
+                    <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">REST Budget</p>
+                    <p className={cn("text-xs font-black uppercase font-mono mt-1", bot.apiBudget?.degradedMode ? "text-amber-400" : "text-emerald-400")}>
+                      {bot.apiBudget?.restRequestsInWindow ?? 0}/{bot.apiBudget?.restBudgetLimit ?? 0}
+                    </p>
+                    <p className="text-[9px] text-slate-600 truncate" title={bot.apiBudget?.throttleReason || "NONE"}>{bot.apiBudget?.throttleReason || "NONE"}</p>
+                  </div>
                 )}
                 {/* Market Regime */}
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">

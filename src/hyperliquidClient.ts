@@ -2,6 +2,23 @@ import { config } from "./config.js";
 import { ethers } from "ethers";
 import { signL1Action } from "hyperliquid";
 import { botState } from "./state.js";
+import { apiBudgetManager, type ApiBudgetLane } from "./services/apiBudgetManager.js";
+
+function infoLaneForType(type: string | undefined): ApiBudgetLane {
+  if (type === "meta" || type === "metaAndAssetCtxs") return "metadata";
+  if (type === "clearinghouseState" || type === "spotClearinghouseState" || type === "userState" || type === "openOrders" || type === "userFills") return "account";
+  return "scanner";
+}
+
+function exchangeLaneForAction(action: any): ApiBudgetLane {
+  if (action?.type === "cancel") return "protection";
+  const orders = Array.isArray(action?.orders) ? action.orders : [];
+  if (orders.length > 0 && orders.every((order: any) => order.r === true)) {
+    const hasTrigger = orders.some((order: any) => !!order.t?.trigger);
+    return hasTrigger ? "tpsl" : "protection";
+  }
+  return "execution";
+}
 
 export class HyperliquidClient {
   private wallet: ethers.Wallet | null = null;
@@ -50,6 +67,7 @@ export class HyperliquidClient {
     const cacheKey = JSON.stringify(payload);
     const now = Date.now();
     const cached = this.requestCache.get(cacheKey);
+    const lane = infoLaneForType(payload?.type);
 
     // Apply different cache times based on payload type
     let effectiveCacheTime = cacheTimeMs;
@@ -66,11 +84,23 @@ export class HyperliquidClient {
     }
 
     if (cached && now - cached.timestamp < effectiveCacheTime) {
+      apiBudgetManager.noteCacheHit(lane, payload?.type || "unknown");
+      botState.apiBudget = apiBudgetManager.getSnapshot();
       return cached.data; // deduplicate/cache return
     }
 
-    // Add API Budget logic: if we just hit 429, don't spam
-    // Not fully implemented but basic backoff happens in the catch
+    const budget = apiBudgetManager.reserve(lane, payload?.type || "info");
+    botState.apiBudget = apiBudgetManager.getSnapshot();
+    if (!budget.allowed) {
+      if (cached) {
+        console.log(`[EXECUTION_VALIDATION_CACHED] Returning stale cached ${payload?.type || "info"} due to ${budget.reason}.`);
+        return cached.data;
+      }
+      if (budget.reason === "EXECUTION_BUDGET_EXCEEDED") {
+        botState.blocker = "EXECUTION_LAYER_THROTTLED";
+      }
+      return null;
+    }
 
     for (let i = 0; i < retries; i++) {
         try {
@@ -81,6 +111,9 @@ export class HyperliquidClient {
           });
           if (res.status === 429) {
              const waitTime = delay * Math.pow(2, i);
+             apiBudgetManager.markExchangeRateLimit("INFO_429", Math.max(waitTime, config.API_HARD_BACKOFF_MS));
+             botState.apiBudget = apiBudgetManager.getSnapshot();
+             botState.apiRateLimitUntil = Date.now() + Math.max(waitTime, config.API_HARD_BACKOFF_MS);
              console.log(`[RATE_LIMIT] 429 on infoRequest, backing off ${waitTime}ms...`);
              await new Promise(resolve => setTimeout(resolve, waitTime));
              continue;
@@ -120,6 +153,16 @@ export class HyperliquidClient {
       return { status: "error", response: "No valid private key provided. Check logs for wallet init errors." };
     }
 
+    const lane = exchangeLaneForAction(action);
+    const isCriticalProtection = lane === "protection" || lane === "tpsl";
+    const budget = apiBudgetManager.reserve(lane, action?.type || "exchange", isCriticalProtection);
+    botState.apiBudget = apiBudgetManager.getSnapshot();
+    if (!budget.allowed) {
+      console.warn(`[EXECUTION_BUDGET_EXCEEDED] Exchange request suppressed. lane=${lane}, action=${action?.type || "unknown"}, reason=${budget.reason}`);
+      if (lane === "execution") botState.blocker = "EXECUTION_LAYER_THROTTLED";
+      return { status: "error", response: budget.reason };
+    }
+
     for (let i = 0; i < retries; i++) {
         try {
           const nonce = Date.now();
@@ -132,10 +175,12 @@ export class HyperliquidClient {
             signature,
           };
 
+          const orderCount = Array.isArray(action?.orders) ? action.orders.length : 0;
+          const cancelCount = Array.isArray(action?.cancels) ? action.cancels.length : 0;
           if (i === 0) {
-            console.log(`[CLIENT] Sending exchange request:`, JSON.stringify(payload));
+            console.log(`[CLIENT] Sending exchange request: action=${action?.type || "unknown"} lane=${lane} orders=${orderCount} cancels=${cancelCount}`);
           } else {
-            console.log(`[CLIENT] Retrying exchange request (attempt ${i + 1}):`, JSON.stringify(payload));
+            console.log(`[CLIENT] Retrying exchange request attempt=${i + 1}: action=${action?.type || "unknown"} lane=${lane} orders=${orderCount} cancels=${cancelCount}`);
           }
 
           const res = await fetch(`${config.HYPERLIQUID_API_URL}/exchange`, {
@@ -146,6 +191,9 @@ export class HyperliquidClient {
 
           if (res.status === 429) {
              const waitTime = delay * Math.pow(2, i);
+             apiBudgetManager.markExchangeRateLimit("EXCHANGE_429", Math.max(waitTime, config.API_HARD_BACKOFF_MS));
+             botState.apiBudget = apiBudgetManager.getSnapshot();
+             botState.apiRateLimitUntil = Date.now() + Math.max(waitTime, config.API_HARD_BACKOFF_MS);
              console.log(`[RATE_LIMIT] 429 on exchangeRequest, backing off ${waitTime}ms...`);
              await new Promise(resolve => setTimeout(resolve, waitTime));
              continue;
@@ -168,6 +216,8 @@ export class HyperliquidClient {
              const strResp = JSON.stringify(parsed);
              if (strResp.includes("Too many cumulative requests sent")) {
                  console.error(`[API_RATE_LIMIT_GLOBAL] Hyperliquid cumulative request rate limit hit!`);
+                 apiBudgetManager.markExchangeRateLimit("CUMULATIVE_REQUEST_LIMIT", config.API_HARD_BACKOFF_MS);
+                 botState.apiBudget = apiBudgetManager.getSnapshot();
                  return parsed;
              }
           }
