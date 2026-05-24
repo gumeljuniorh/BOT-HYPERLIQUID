@@ -2532,6 +2532,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
       }
 
       oFinalExecScore = capConfidence + cmcTrendBoost + cmcVolumeBoost + cmcNarrativeBoost + cmcMomentumBoost + volatilityExpansionBoost + volatileGemBoost;
+      console.log(`[CMC_HL_SCORE_MERGED] ${sym} HL=${capConfidence} CMCTrend=${matchedCmc.trendScore} Narrative=${matchedCmc.narrative} Volume24h=${matchedCmc.volumeGrowth24h.toFixed(1)} Final=${oFinalExecScore}`);
     }
     oFinalExecScore = Math.min(100, Math.max(0, Math.round(oFinalExecScore)));
 
@@ -2561,6 +2562,59 @@ async function handleTradingLogic(isEmergencyMode = false) {
        console.log(`[CONTRADICTION_DETECTED] ACTIVE_TARGET but rejected with NO_TRADE_SIGNAL. Likely signal confirmation lag. Bypassing state lock to HIGH_RISK_NEEDS_CONFIRMATION.`);
        // rejectionReason = "HIGH_RISK_NEEDS_CONFIRMATION"; (Removed soft blocker)
     }
+
+    const regimeScore = Math.round(
+      ["TRENDING", "HEALTHY_DIRECTIONAL_VOL", "DEVELOPING_CONTINUATION", "PRE_BREAKOUT_MOMENTUM", "RUNNER_SETUP_DETECTED"].includes(oppSignal.marketRegime || "")
+        ? 80
+        : oppSignal.marketRegime === "RANGING_CHOP" || oppSignal.marketRegime === "DEAD_LOW_VOL"
+          ? 35
+          : 60
+    );
+    const momentumScorePct = Math.round((oppSignal.momentumScore || 0) * 100);
+    const volatilityScorePct = Math.round((oppSignal.volatilityScore || 0) * 100);
+    const volumeScore = matchedCmc ? Math.max(0, Math.min(100, Math.round(50 + matchedCmc.volumeGrowth24h))) : momentumScorePct;
+    const spreadSlippageScore = Math.round((spreadScore + liquidityScore) / 2);
+    const feePenalty = Math.round((botState.feeEfficiency?.feeToProfitRatio || 0) * 20);
+    const feeAdjustedExpectedValue = Math.max(0, Math.round((oppSignal.expectedMovePct || 0) * 100 - feePenalty));
+    const selectedSide = directionDecision.includes("LONG") ? "LONG" : directionDecision.includes("SHORT") ? "SHORT" : "NONE";
+    const action = !price || price <= 0
+      ? "BLOCKED_HARD_SAFETY"
+      : eligibility === "ELIGIBLE"
+        ? selectedSide === "LONG" ? "EXECUTE_LONG" : selectedSide === "SHORT" ? "EXECUTE_SHORT" : "WATCH"
+        : matchedCmc && !matchedCmc.matchedSymbol
+          ? "NARRATIVE_ONLY"
+          : rejectionReason
+            ? "WATCH"
+            : "DEPRIORITIZE";
+
+    console.log(`[ASSET_DECISION_TRACE] ${JSON.stringify({
+      symbol: sym,
+      cmcTrendScore: matchedCmc?.trendScore || 0,
+      cmcMomentumPersistence: matchedCmc?.momentumPersistenceScore || 0,
+      sector: matchedCmc?.narrative || "NONE",
+      narrative: matchedCmc?.narrative || "NONE",
+      hlMatched: !!meta,
+      tradable: !!meta && !!price,
+      longConfidence: oppSignal.longConfidence || 0,
+      shortConfidence: oppSignal.shortConfidence || 0,
+      continuationConfidence: Math.max(0, capConfidence - (oppSignal.reversalProbability || 0) * 0.2),
+      reversalConfidence: oppSignal.reversalProbability || 0,
+      exhaustionProbability: oppSignal.exhaustionProbability || 0,
+      trendCollapseProbability: oppSignal.trendPhase === "TREND_COLLAPSE" ? 80 : 0,
+      localScannerConfidence: capConfidence,
+      regimeScore,
+      momentumScore: momentumScorePct,
+      liquidityScore,
+      volumeScore,
+      spreadSlippageScore,
+      volatilityScore: volatilityScorePct,
+      feeAdjustedExpectedValue,
+      hardBlocker: confirmationStatusScanner.startsWith("REJECTED") ? confirmationStatusScanner : null,
+      rejectionReason,
+      finalScore: oFinalExecScore,
+      selectedSide,
+      action
+    })}`);
 
     opportunities.push({
       symbol: sym,
@@ -2607,6 +2661,12 @@ async function handleTradingLogic(isEmergencyMode = false) {
       watchlistState,
       finalExecutionScore: oFinalExecScore,
       momentumPersistenceScore: matchedCmc?.momentumPersistenceScore,
+      regimeScore,
+      volumeScore,
+      spreadSlippageScore,
+      feeAdjustedExpectedValue,
+      selectedSide,
+      action,
     });
   }
 
