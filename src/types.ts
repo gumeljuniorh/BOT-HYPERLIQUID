@@ -198,6 +198,11 @@ export interface BotState {
     highestUnrealizedPnlPct?: number;
     currentLockedProfitPct?: number;
     activeProfitLockLevel?: string;
+    highestFavorablePrice?: number | null;
+    maxFavorableExcursionPct?: number;
+    dynamicSlPrice?: number | null;
+    runnerModeActive?: boolean;
+    lastProfitLockLogLevel?: string;
     isLateButTradeable?: boolean;
     requiresTightTrailing?: boolean;
     isChopRecovery?: boolean;

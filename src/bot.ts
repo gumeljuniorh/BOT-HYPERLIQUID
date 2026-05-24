@@ -6140,6 +6140,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
       botState.protection.highestUnrealizedPnlPct = pnlPct;
     }
 
+    if (!botState.protection.highestFavorablePrice || botState.protection.highestFavorablePrice <= 0) {
+      botState.protection.highestFavorablePrice = currentPrice;
+    }
+    const priorFavorablePrice = botState.protection.highestFavorablePrice;
+    botState.protection.highestFavorablePrice = currentSide === "LONG"
+      ? Math.max(priorFavorablePrice, currentPrice)
+      : Math.min(priorFavorablePrice, currentPrice);
+    const favorableExcursionPct = currentSide === "LONG"
+      ? ((botState.protection.highestFavorablePrice - entryPx) / entryPx) * 100
+      : ((entryPx - botState.protection.highestFavorablePrice) / entryPx) * 100;
+    botState.protection.maxFavorableExcursionPct = Math.max(botState.protection.maxFavorableExcursionPct || 0, favorableExcursionPct);
+
     const hlPnl = botState.protection.highestUnrealizedPnlPct;
     
     let level3Threshold = 3.0;
@@ -6192,8 +6204,15 @@ async function handleTradingLogic(isEmergencyMode = false) {
         // Only update slPrice if it's tighter (better)
         const isBetterLock = slPrice === null || (currentSide === "LONG" ? lockPrice > slPrice : lockPrice < slPrice);
         if (isBetterLock) {
+            const previousSl = slPrice;
             slPrice = lockPrice;
             botState.protection.slPrice = lockPrice;
+            botState.protection.dynamicSlPrice = lockPrice;
+            if ((botState.protection.currentLockedProfitPct || 0) <= 0.08 && botState.protection.lastProfitLockLogLevel !== "BREAKEVEN") {
+              botState.protection.lastProfitLockLogLevel = "BREAKEVEN";
+              console.log(`[BREAKEVEN_LOCK_ACTIVATED] ${botState.activeSymbol} SL moved to breakeven buffer after fees/spread coverage.`);
+            }
+            console.log(`[WINNING_POSITION_SL_ADJUSTED] ${botState.activeSymbol} ${currentSide} SL improved from ${previousSl ?? "NONE"} to ${lockPrice.toFixed(6)}. Locked profit=${(botState.protection.currentLockedProfitPct || 0).toFixed(2)}%, MFE=${(botState.protection.maxFavorableExcursionPct || 0).toFixed(2)}%.`);
         }
       }
     }
@@ -6204,13 +6223,16 @@ async function handleTradingLogic(isEmergencyMode = false) {
        if (isStrongMomentum) {
           botState.protection.activeProfitLockLevel = "TRAILING";
           botState.protection.isTrailingActive = true;
+          botState.protection.runnerModeActive = true;
           botState.protection.tpPrice = null; // Remove rigid TP
           const slippage = botState.protection.isLateButTradeable ? 0.3 : 0.5;
           const lockPrice = currentSide === "LONG" ? currentPrice * (1 - slippage / 100) : currentPrice * (1 + slippage / 100);
           botState.protection.trailingStopPrice = lockPrice;
+          botState.protection.dynamicSlPrice = lockPrice;
           trailingStopPrice = lockPrice;
           botState.protection.currentLockedProfitPct = Math.max(botState.protection.currentLockedProfitPct || 0, pnlPct - slippage);
           console.log(`[PROFIT_LOCK_LEVEL_3] Profit reached +${level3Threshold.toFixed(2)}% and momentum strong. Trailing mode activated.`);
+          console.log(`[RUNNER_CAPTURE_MODE_ACTIVE] ${botState.activeSymbol} runner mode active. TP removed; trailing behind structure with MFE ${(botState.protection.maxFavorableExcursionPct || 0).toFixed(2)}%.`);
        } else {
           // If momentum not strong, lock harder
           if (botState.protection.activeProfitLockLevel !== "LEVEL_3") {
@@ -6277,6 +6299,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           botState.protection.tpPrice = null; // Remove rigid TP
           botState.protection.isTrailingActive = true;
           botState.protection.activeProfitLockLevel = "TRAILING";
+          botState.protection.runnerModeActive = true;
           
           // Apply tight trailing Stop immediately to lock in the TP
           const slippage = 0.5; // Very tight slippage for extended runners
@@ -6285,6 +6308,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
             : currentPrice * (1 + slippage / 100);
           
           botState.protection.trailingStopPrice = lockPrice;
+          botState.protection.dynamicSlPrice = lockPrice;
           trailingStopPrice = lockPrice;
 
           // Compute locked profit %
@@ -6292,6 +6316,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
             ? ((lockPrice - entryPx) / entryPx) * 100
             : ((entryPx - lockPrice) / entryPx) * 100;
           botState.protection.currentLockedProfitPct = Math.max(0, lockedTrailPnl);
+          console.log(`[RUNNER_CAPTURE_MODE_ACTIVE] ${botState.activeSymbol} base TP reached with strong continuation. Dynamic runner trailing engaged.`);
 
         } else {
           isExitTriggered = true;
@@ -6340,6 +6365,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
               ? currentPrice * (1 - slippage / 100)
               : currentPrice * (1 + slippage / 100);
           botState.protection.trailingStopPrice = lockPrice;
+          botState.protection.dynamicSlPrice = lockPrice;
           trailingStopPrice = lockPrice;
           
           // Compute locked profit %
@@ -6351,6 +6377,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log(
             `BOT: INIT_TRAILING_STOP at ${currentPrice} (slippage: ${slippage}%)`,
           );
+          console.log(`[RUNNER_CAPTURE_MODE_ACTIVE] ${botState.activeSymbol} trailing runner mode initialized at ${lockPrice.toFixed(6)}.`);
         }
       } else if (trailingStopPrice !== null) {
         botState.protection.activeProfitLockLevel = "TRAILING";
@@ -6359,7 +6386,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const newTrail = currentPrice * (1 - slippage / 100);
           if (newTrail > trailingStopPrice) {
             botState.protection.trailingStopPrice = newTrail;
+            botState.protection.dynamicSlPrice = newTrail;
             trailingStopPrice = newTrail;
+            console.log(`[STRUCTURE_TRAILING_STOP_UPDATED] ${botState.activeSymbol} LONG trail improved to ${newTrail.toFixed(6)} using volatility/structure buffer.`);
           }
           const lockedTrailPnl = ((trailingStopPrice - entryPx) / entryPx) * 100;
           botState.protection.currentLockedProfitPct = Math.max(0, lockedTrailPnl);
@@ -6373,7 +6402,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const newTrail = currentPrice * (1 + slippage / 100);
           if (newTrail < trailingStopPrice) {
             botState.protection.trailingStopPrice = newTrail;
+            botState.protection.dynamicSlPrice = newTrail;
             trailingStopPrice = newTrail;
+            console.log(`[STRUCTURE_TRAILING_STOP_UPDATED] ${botState.activeSymbol} SHORT trail improved to ${newTrail.toFixed(6)} using volatility/structure buffer.`);
           }
           const lockedTrailPnl = ((entryPx - trailingStopPrice) / entryPx) * 100;
           botState.protection.currentLockedProfitPct = Math.max(0, lockedTrailPnl);
