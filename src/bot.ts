@@ -3415,6 +3415,10 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
   // Calculate and update HYPE-USDC diagnostic status
   const hypeOpp = opportunities.find(o => o.symbol === "HYPE-USDC");
+  const hypeMeta = getAssetMeta("HYPE-USDC");
+  const hypeAssetId = getAssetId("HYPE-USDC");
+  const hypeIncludedInUniverse = universe.includes("HYPE-USDC");
+  const hypeValidPrice = validUniverse.includes("HYPE-USDC") && !!botState.markPrices?.["HYPE-USDC"];
   if (hypeOpp) {
     if (!hypeOpp.rejectionReason) {
       botState.hypeStatus = "ACTIVE_IN_SCANNER";
@@ -3429,6 +3433,25 @@ async function handleTradingLogic(isEmergencyMode = false) {
     } else {
       botState.hypeStatus = "FOUND";
     }
+  }
+  botState.hypeDiagnostics = {
+    includedInUniverse: hypeIncludedInUniverse,
+    validPrice: hypeValidPrice,
+    metaLoaded: !!hypeMeta,
+    assetId: hypeAssetId,
+    activeInScanner: !!hypeOpp,
+    eligibility: hypeOpp?.eligibility || "NOT_SCANNED",
+    rejectionReason: hypeOpp?.rejectionReason || null,
+    selectedSide: hypeOpp?.selectedSide || hypeOpp?.directionalBias || "NONE",
+    finalScore: hypeOpp?.finalExecutionScore || 0,
+    canTradeIfConditionsPass: !!hypeMeta && hypeValidPrice && (!hypeOpp?.rejectionReason || hypeOpp?.eligibility === "ELIGIBLE"),
+    updatedAt: Date.now()
+  };
+  console.log(`[HYPE_ELIGIBILITY_DIAGNOSTIC] ${JSON.stringify(botState.hypeDiagnostics)}`);
+  if (botState.hypeDiagnostics.canTradeIfConditionsPass) {
+    console.log(`[HYPE_SCAN_TRADE_READY] HYPE-USDC can be scanned and routed if risk, signal, size, and TP/SL checks pass.`);
+  } else {
+    console.log(`[HYPE_NOT_SELECTED_REASON] ${botState.hypeStatus}. Eligibility=${botState.hypeDiagnostics.eligibility}, rejection=${botState.hypeDiagnostics.rejectionReason || "NONE"}, validPrice=${hypeValidPrice}, metaLoaded=${!!hypeMeta}.`);
   }
 
   botState.marketScanner = {

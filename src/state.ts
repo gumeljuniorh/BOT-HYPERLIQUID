@@ -211,7 +211,20 @@ export const botState: BotState = {
   },
   rejectedSetups: [],
   recentCandidates: [],
-  hypeStatus: "FOUND"
+  hypeStatus: "FOUND",
+  hypeDiagnostics: {
+    includedInUniverse: false,
+    validPrice: false,
+    metaLoaded: false,
+    assetId: -1,
+    activeInScanner: false,
+    eligibility: "UNKNOWN",
+    rejectionReason: null,
+    selectedSide: "NONE",
+    finalScore: 0,
+    canTradeIfConditionsPass: false,
+    updatedAt: Date.now()
+  }
 };
 
 export const HYPE_MAPPING = {

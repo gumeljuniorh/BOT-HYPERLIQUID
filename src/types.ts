@@ -222,6 +222,19 @@ export interface BotState {
   overtradingPauseUntil?: number;
   reverseLockUntil?: number;
   hypeStatus?: string;
+  hypeDiagnostics?: {
+    includedInUniverse: boolean;
+    validPrice: boolean;
+    metaLoaded: boolean;
+    assetId: number;
+    activeInScanner: boolean;
+    eligibility: string;
+    rejectionReason: string | null;
+    selectedSide: string;
+    finalScore: number;
+    canTradeIfConditionsPass: boolean;
+    updatedAt: number;
+  };
   directionFlips?: number[];
   noTradeUntil?: number;
   feeEfficiencyPauseUntil?: number;
