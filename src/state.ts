@@ -25,12 +25,12 @@ export const botState: BotState = {
   },
   operationalState: "ACTIVE_TRADING",
   riskProfile: "BALANCED",
-  maxAllowedPositions: config.MAX_OPEN_POSITIONS,
-  dynamicPositionLimitReason: "Configured position limit active",
-  configuredMaxPositions: config.MAX_OPEN_POSITIONS,
-  effectiveMaxPositions: config.MAX_OPEN_POSITIONS,
+  maxAllowedPositions: 3,
+  dynamicPositionLimitReason: "Normal multi-position mode active",
+  configuredMaxPositions: 3,
+  effectiveMaxPositions: 3,
   usedPositions: 0,
-  availableSlots: config.MAX_OPEN_POSITIONS,
+  availableSlots: 3,
   slotReductionReason: "NONE",
   slotReductionIsHardSafety: false,
   previousPhase: null,
@@ -76,12 +76,7 @@ export const botState: BotState = {
     maxExposure: 40,
     leverage: 2,
     stopLossPct: 1.2,
-    takeProfitPct: 3.0,
-    minSignalConfidence: config.MIN_SIGNAL_CONFIDENCE,
-    minTradeQualityScore: config.MIN_TRADE_QUALITY_SCORE,
-    minExpectedMovePct: config.MIN_EXPECTED_MOVE_PCT,
-    maxFeeToExpectedRewardRatio: config.MAX_FEE_TO_EXPECTED_REWARD_RATIO,
-    maxOpenPositions: config.MAX_OPEN_POSITIONS
+    takeProfitPct: 3.0
   },
   protection: {
     tpPrice: null,
@@ -90,10 +85,7 @@ export const botState: BotState = {
     isTrailingActive: false,
     highestUnrealizedPnlPct: 0,
     currentLockedProfitPct: 0,
-    activeProfitLockLevel: "NONE",
-    runnerCaptureModeActive: false,
-    microScalpExitBlockedCount: 0,
-    prematureExitBlockedCount: 0
+    activeProfitLockLevel: "NONE"
   },
   cooldownUntil: 0,
   cooldownType: "SOFT", // Initial default
@@ -145,10 +137,6 @@ export const botState: BotState = {
     lessons: ["Awaiting initial trade data for analysis..."],
     updatedAt: Date.now(),
     averageTradeDuration: 0,
-    winnerLoserRatio: 0,
-    runnerCaptureCount: 0,
-    prematureExitCount: 0,
-    microScalpExitBlockedCount: 0,
     winLossByMarketRegime: {},
     bestRegime: "N/A",
     worstRegime: "N/A",
@@ -201,17 +189,11 @@ export const botState: BotState = {
     activeSlCount: 0,
     duplicateProtectionWarnings: 0,
     protectionSyncHealth: "UNKNOWN",
-    lastProtectionSync: 0,
-    currentProtectionIssue: "AWAITING_FIRST_SYNC",
-    repairRequired: false,
-    repairInProgress: false,
-    lastRepairAction: "NONE",
-    lastRepairCompletedAt: 0
+    lastProtectionSync: 0
   },
   rejectedSetups: [],
   recentCandidates: [],
-  hypeStatus: "FOUND",
-  protectionReadiness: "PROTECTION_READY_FOR_EXECUTION"
+  hypeStatus: "FOUND"
 };
 
 export const HYPE_MAPPING = {

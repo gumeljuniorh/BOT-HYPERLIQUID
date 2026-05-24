@@ -1,83 +1,78 @@
 import { botState } from "../state.js";
-import { config } from "../config.js";
 
-export interface PositionSlotState {
-  configuredMaxPositions: number;
-  effectiveMaxPositions: number;
-  usedPositions: number;
-  availableSlots: number;
-  slotReductionReason: string;
-  slotReductionIsHardSafety: boolean;
-}
+export function calculatePositionSlots(): void {
+  const configuredMax = 3;
+  const used = botState.openPositions || 0;
+  
+  botState.configuredMaxPositions = configuredMax;
+  botState.usedPositions = used;
 
-function openPositionCount(): number {
-  const activeExchangePositions = (botState.allPositions || []).filter((p: any) => Math.abs(parseFloat(p?.szi || "0")) > 0);
-  if (activeExchangePositions.length > 0) return activeExchangePositions.length;
-  if (typeof botState.openPositions === "number" && botState.openPositions > 0) return botState.openPositions;
-  return botState.positionDetails && Math.abs(parseFloat(botState.positionDetails?.szi || "0")) > 0 ? 1 : 0;
-}
+  let effectiveMax = configuredMax;
+  let reason = "NONE";
+  let isHardSafety = false;
 
-function currentHardSlotReason(usedPositions: number): string {
-  const telemetry = botState.telemetry;
-  const currentDrawdown = botState.analytics?.currentDrawdown || 0;
-  const severeDrawdownIsReal =
-    botState.drawdownSeverity === "HARD" &&
-    (currentDrawdown >= 10 || ((botState.drawdownPauseUntil || 0) > Date.now() && currentDrawdown >= 5));
-
-  if (!botState.apiConnected || !botState.wssConnected) return "WSS_API_UNHEALTHY";
-  if ((botState.freeCollateralPct || 100) < 15 || (botState.availableMargin || 0) <= 0) return "UNSAFE_COLLATERAL";
-  if (botState.phase === "CIRCUIT_BREAKER_ACTIVE" || botState.blocker === "CRITICAL_FAILURE") return "CORRUPTED_POSITION_STATE";
-  if (severeDrawdownIsReal) return "SEVERE_DRAWDOWN";
-  if (botState.protectionStatus === "REPAIRING") return "PROTECTION_REPAIRING";
-  if (botState.protectionStatus === "FAILED_EMERGENCY_CLOSE_REQUIRED") return "EMERGENCY_CLOSE_FAILURE";
-
-  if (usedPositions > 0) {
-    if ((telemetry?.currentProtectionIssue || "").includes("MISSING_SL")) return "ACTIVE_POSITION_MISSING_SL";
-    if ((telemetry?.currentProtectionIssue || "").includes("MISSING_TP")) return "ACTIVE_POSITION_MISSING_TP";
-    if ((telemetry?.currentProtectionIssue || "").includes("DUPLICATE")) return "DUPLICATE_TP_SL_PROTECTION";
-    if (telemetry?.protectionSyncHealth === "UNHEALTHY") return "PROTECTION_UNHEALTHY";
-    if ((telemetry?.activeSlCount || 0) < 1 && botState.protectionStatus !== "CONFIRMED") return "ACTIVE_POSITION_MISSING_SL";
+  // Real hard safety reasons that should restrict trading slots
+  if (botState.protectionStatus === "REPAIRING" || botState.protectionStatus === "FAILED_EMERGENCY_CLOSE_REQUIRED") {
+     effectiveMax = used; // prevent new, allow existing
+     reason = `PROTECTION_${botState.protectionStatus}`;
+     isHardSafety = true;
+  }
+  
+  if (botState.telemetry && botState.telemetry.protectionSyncHealth === "UNHEALTHY") {
+     effectiveMax = used;
+     reason = "PROTECTION_SYNC_ERROR";
+     isHardSafety = true;
+  }
+  
+  // Severe drawdown
+  if (botState.drawdownSeverity === "HARD" || botState.blocker === "HARD_DRAWDOWN_PAUSE_ACTIVE") {
+     effectiveMax = 0;
+     reason = "SEVERE_DRAWDOWN";
+     isHardSafety = true;
   }
 
-  const scanner = botState.marketScanner;
-  if ((scanner?.spreadQuality || 100) < 15 || (scanner?.liquidityScore || 100) < 15) return "CATASTROPHIC_SPREAD_LIQUIDITY";
+  // Bad connectivity or extreme API lag
+  if (!botState.wssConnected || !botState.apiConnected) {
+     effectiveMax = used;
+     reason = "WSS_API_UNSTABLE";
+     isHardSafety = true;
+  }
+  
+  // Free collateral constraints
+  if ((botState.freeCollateralPct || 100) < 15) {
+     effectiveMax = used;
+     reason = "INSUFFICIENT_COLLATERAL";
+     isHardSafety = true;
+  }
 
-  const apiError = botState.lastApiError || "";
-  if (/reject|insufficient|invalid order|exchange/i.test(apiError)) return "EXCHANGE_ORDER_REJECTION_STATE";
+  // Other known hard blockers
+  const hardBlockers = [
+    "TP_SL_MISSING_FOR_OPEN_POSITION",
+    "CRITICAL_FAILURE",
+    "API_NOT_VERIFIED",
+    "CORRUPTED_POSITION_STATE",
+    "CATASTROPHIC_LIQUIDITY",
+    "ORDER_SUBMITTED_FAILED"
+  ];
+  
+  const blocker = botState.blocker || "";
+  if (!isHardSafety && hardBlockers.some(b => blocker.includes(b))) {
+     effectiveMax = used; 
+     reason = botState.blocker || "HARD_SAFETY_BLOCK";
+     isHardSafety = true;
+  }
+  
+  if (used >= effectiveMax && isHardSafety) {
+     effectiveMax = used;
+  }
 
-  return "NONE";
-}
-
-export function calculatePositionSlots(): PositionSlotState {
-  const configuredMaxPositions = Math.max(3, Math.floor(botState.config?.maxOpenPositions || config.MAX_OPEN_POSITIONS || 3));
-  const usedPositions = openPositionCount();
-  const slotReductionReason = currentHardSlotReason(usedPositions);
-  const slotReductionIsHardSafety = slotReductionReason !== "NONE";
-  const effectiveMaxPositions = slotReductionIsHardSafety
-    ? Math.min(configuredMaxPositions, usedPositions)
-    : configuredMaxPositions;
-  const availableSlots = Math.max(0, effectiveMaxPositions - usedPositions);
-
-  botState.configuredMaxPositions = configuredMaxPositions;
-  botState.effectiveMaxPositions = effectiveMaxPositions;
-  botState.usedPositions = usedPositions;
-  botState.availableSlots = availableSlots;
-  botState.slotReductionReason = slotReductionReason;
-  botState.slotReductionIsHardSafety = slotReductionIsHardSafety;
-  botState.maxAllowedPositions = effectiveMaxPositions;
-  botState.dynamicPositionLimitReason = slotReductionIsHardSafety ? slotReductionReason : "NONE";
-
-  return {
-    configuredMaxPositions,
-    effectiveMaxPositions,
-    usedPositions,
-    availableSlots,
-    slotReductionReason,
-    slotReductionIsHardSafety
-  };
+  botState.effectiveMaxPositions = effectiveMax;
+  botState.availableSlots = Math.max(0, effectiveMax - used);
+  botState.slotReductionReason = reason;
+  botState.slotReductionIsHardSafety = isHardSafety;
 }
 
 export function canOpenNewEntry(): boolean {
-  const slots = calculatePositionSlots();
-  return !slots.slotReductionIsHardSafety && slots.availableSlots > 0;
+  calculatePositionSlots();
+  return (botState.availableSlots || 0) > 0;
 }

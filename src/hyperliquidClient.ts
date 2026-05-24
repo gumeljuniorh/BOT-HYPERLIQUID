@@ -125,12 +125,21 @@ export class HyperliquidClient {
           }
 
           const responseText = await res.text();
+          let parsed;
           try {
-            return JSON.parse(responseText);
+            parsed = JSON.parse(responseText);
           } catch (err) {
             console.error("exchangeRequest returned non-JSON:", responseText, "Payload was:", JSON.stringify(payload));
             return { status: "error", response: responseText };
           }
+          
+          if (parsed && parsed.status === "err" && typeof parsed.response === "string" && parsed.response.includes("Too many cumulative requests sent")) {
+             console.error(`[API_RATE_LIMIT_GLOBAL] Hyperliquid cumulative request rate limit hit!`);
+             // We return it anyway so callers can handle it to pause logic.
+             return parsed;
+          }
+          
+          return parsed;
         } catch (err: any) {
           if (i === retries - 1) {
             console.error("exchangeRequest failed after retries", err);

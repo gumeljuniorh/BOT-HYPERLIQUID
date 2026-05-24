@@ -1,5 +1,4 @@
 node_modules/
-.npm-cache/
 build/
 dist/
 coverage/
@@ -7,5 +6,3 @@ coverage/
 *.log
 .env*
 !.env.example
-.bot_state_snapshot.json
-trades_history.json

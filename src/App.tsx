@@ -515,11 +515,6 @@ function AppContent() {
     netProfitability: 0,
     maxDrawdown: 0
   };
-  const configuredMaxPositions = bot.configuredMaxPositions ?? bot.config?.maxOpenPositions ?? 3;
-  const effectiveMaxPositions = bot.effectiveMaxPositions ?? bot.maxAllowedPositions ?? configuredMaxPositions;
-  const usedPositions = bot.usedPositions ?? bot.openPositions ?? 0;
-  const availableSlots = bot.availableSlots ?? Math.max(0, effectiveMaxPositions - usedPositions);
-  const slotRestrictionReason = bot.slotReductionReason || bot.dynamicPositionLimitReason || "NONE";
 
   const blockerInfo = useMemo(() => {
     const b = bot.blocker;
@@ -938,12 +933,12 @@ function AppContent() {
           <div className="hidden md:flex h-14 border-b border-slate-800/80 bg-[#0c0e12]/50 items-center px-6 gap-8 overflow-x-auto whitespace-nowrap scrollbar-hide shrink-0">
              <BalanceDisplay label="TOTAL EQUITY" value={bot.accountEquity || 0} />
              <BalanceDisplay label="AVAILABLE MARGIN" value={bot.availableMargin || 0} />
-             {isAdvancedMode && <BalanceDisplay label="RESERVED POSITION MARGIN" value={bot.reservedPositionMargin !== undefined ? bot.reservedPositionMargin : (bot.marginUsed || 0)} />}
-             {isAdvancedMode && <BalanceDisplay label="RESERVED ORDER MARGIN" value={bot.reservedOrderMargin || 0} />}
-             {isAdvancedMode && <BalanceDisplay label="FREE COLLATERAL %" value={(bot.freeCollateralPct !== undefined ? bot.freeCollateralPct : (bot.accountEquity > 0 ? (bot.availableMargin / bot.accountEquity) * 100 : 100)).toFixed(1) + "%"} isString />}
-             {isAdvancedMode && <BalanceDisplay label="PORTFOLIO EXPOSURE USED %" value={(bot.portfolioExposureUsedPct || 0).toFixed(1) + "%"} isString />}
+             <BalanceDisplay label="RESERVED POSITION MARGIN" value={bot.reservedPositionMargin !== undefined ? bot.reservedPositionMargin : (bot.marginUsed || 0)} />
+             <BalanceDisplay label="RESERVED ORDER MARGIN" value={bot.reservedOrderMargin || 0} />
+             <BalanceDisplay label="FREE COLLATERAL %" value={(bot.freeCollateralPct !== undefined ? bot.freeCollateralPct : (bot.accountEquity > 0 ? (bot.availableMargin / bot.accountEquity) * 100 : 100)).toFixed(1) + "%"} isString />
+             <BalanceDisplay label="PORTFOLIO EXPOSURE USED %" value={(bot.portfolioExposureUsedPct || 0).toFixed(1) + "%"} isString />
              <BalanceDisplay label="OPEN POSITION COUNT" value={bot.openPositions || 0} isString />
-             {isAdvancedMode && <BalanceDisplay label="RESTING ENTRY ORDER COUNT" value={bot.restingEntryOrderCount !== undefined ? bot.restingEntryOrderCount : 0} isString />}
+             <BalanceDisplay label="RESTING ENTRY ORDER COUNT" value={bot.restingEntryOrderCount !== undefined ? bot.restingEntryOrderCount : 0} isString />
              <BalanceDisplay label="REALIZED PNL" value={bot.realizedPnl || 0} color={(bot.realizedPnl || 0) >= 0 ? "emerald" : "rose"} />
              <BalanceDisplay label="UNREALIZED PNL" value={bot.unrealizedPnl || 0} color={(bot.unrealizedPnl || 0) >= 0 ? "emerald" : "rose"} />
           </div>
@@ -959,16 +954,7 @@ function AppContent() {
                 <HealthIndicator label="WSS" status={bot.wssConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="API" status={bot.apiConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="Margin" status={bot.availableMargin >= 40 ? "Healthy" : bot.availableMargin >= 20 ? "Warning" : "Critical"} />
-                <HealthIndicator
-                  label="Protection Health"
-                  status={
-                    bot.openPositions === 0 ||
-                    bot.telemetry?.protectionSyncHealth === "HEALTHY" ||
-                    (bot.protectionStatus === "CONFIRMED" && (bot.telemetry?.activeSlCount || 0) >= 1)
-                      ? "Healthy"
-                      : "Warning"
-                  }
-                />
+                <HealthIndicator label="Protection Health" status={bot.openPositions === 0 ? "Healthy" : (bot.protectionStatus === "CONFIRMED" ? "Healthy" : "Warning")} />
                 {isAdvancedMode && <HealthIndicator label="Learning Engine" status="Healthy" />}
               </div>
             </div>
@@ -1025,28 +1011,28 @@ function AppContent() {
                 )}
                 {/* Open Positions / Slots */}
                 <div className="space-y-1.5 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono text-xs">
-                  <div className="flex justify-between items-center">
-                    <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Open Positions</p>
-                    <span className="text-[8px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-bold uppercase">
-                      Effective: {effectiveMaxPositions}
-                    </span>
+                  <div className="flex justify-between items-center mb-1">
+                    <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Position Slots</p>
                   </div>
-                  <div className="flex items-baseline justify-between">
-                    <div className="flex items-baseline gap-1.5">
-                      <p className="text-xl font-black text-white">{usedPositions} / {configuredMaxPositions}</p>
-                      <span className="text-[10px] text-slate-400 font-bold">
-                        ({availableSlots} slots left)
-                      </span>
-                    </div>
+                  <div className="flex justify-between text-[10px]">
+                    <span className="text-slate-500 hover:text-slate-400">Configured Max:</span>
+                    <span className="text-white font-medium">{bot.configuredMaxPositions || 3}</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1 border-t border-slate-900 text-[8px] text-slate-500">
-                    <span>Configured: <strong className="text-slate-300">{configuredMaxPositions}</strong></span>
-                    <span>Effective: <strong className="text-slate-300">{effectiveMaxPositions}</strong></span>
-                    <span>Used: <strong className="text-slate-300">{usedPositions}</strong></span>
-                    <span>Available: <strong className="text-slate-300">{availableSlots}</strong></span>
-                    <div className="col-span-2 truncate" title={slotRestrictionReason}>
-                      Slot Restriction: <span className={cn("font-medium", bot.slotReductionIsHardSafety ? "text-rose-400" : "text-emerald-400")}>{slotRestrictionReason}</span>
-                    </div>
+                  <div className="flex justify-between text-[10px]">
+                    <span className="text-slate-500 hover:text-slate-400">Effective Max:</span>
+                    <span className={(bot.effectiveMaxPositions !== undefined ? bot.effectiveMaxPositions : 3) < (bot.configuredMaxPositions || 3) ? "text-rose-400 font-bold" : "text-white font-medium"}>{bot.effectiveMaxPositions !== undefined ? bot.effectiveMaxPositions : 3}</span>
+                  </div>
+                  <div className="flex justify-between text-[10px]">
+                    <span className="text-slate-500 hover:text-slate-400">Used Positions:</span>
+                    <span className="text-white font-medium">{bot.usedPositions !== undefined ? bot.usedPositions : (bot.openPositions || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-[10px] pb-1 border-b border-slate-800">
+                    <span className="text-slate-500 hover:text-slate-400">Available Slots:</span>
+                    <span className={(bot.availableSlots || 0) === 0 ? "text-rose-400 font-bold" : "text-emerald-400 font-bold"}>{bot.availableSlots !== undefined ? bot.availableSlots : Math.max(0, 3 - (bot.openPositions || 0))}</span>
+                  </div>
+                  <div className="pt-1 text-[9px] truncate" title={bot.slotReductionReason || "NONE"}>
+                    <span className="text-slate-600">Restriction: </span>
+                    <span className={(bot.slotReductionIsHardSafety) ? "text-rose-400 font-bold" : "text-slate-400 font-medium"}>{bot.slotReductionReason || "NONE"}</span>
                   </div>
                 </div>
                 {/* Available Margin */}
@@ -1054,28 +1040,24 @@ function AppContent() {
                   <p className="text-[9px] uppercase font-bold text-[#8A4FFF] tracking-wider font-mono">Available Margin</p>
                   <p className="text-xl font-black font-mono text-white">${bot.availableMargin.toFixed(2)}</p>
                 </div>
-                {/* Risk Mode */}
-                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
-                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Risk Mode</p>
-                  <p className={cn(
-                    "text-xs font-black uppercase font-mono mt-1",
-                    bot.drawdownSeverity && bot.drawdownSeverity !== "NONE"
-                      ? "text-rose-400"
-                      : bot.feeEfficiency?.isPaused || bot.cooldownUntil && bot.cooldownUntil > Date.now()
-                        ? "text-amber-400"
-                        : "text-emerald-400"
-                  )}>
-                    {bot.drawdownSeverity && bot.drawdownSeverity !== "NONE"
-                      ? `${bot.drawdownSeverity} Drawdown`
-                      : bot.feeEfficiency?.isPaused || bot.cooldownUntil && bot.cooldownUntil > Date.now()
-                        ? "Risk Reduced"
-                        : "Balanced"}
-                  </p>
-                </div>
-                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
-                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Blocker</p>
-                  <p className="text-xs font-black uppercase font-mono text-white mt-1 truncate" title={bot.blocker || "None"}>{bot.blocker || "None"}</p>
-                </div>
+                {isAdvancedMode && (
+                  <>
+                    {/* Risk Mode */}
+                    <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
+                      <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Current Risk Mode</p>
+                      <p className={cn(
+                        "text-xs font-black uppercase font-mono mt-1",
+                        bot.blocker && ["FEE_HARD_SUSPENSION_ACTIVE", "FEE_SOFT_SUSPENSION_ACTIVE", "BELOW_PREFERRED_SAFETY_TARGET"].includes(bot.blocker)
+                          ? "text-amber-400"
+                          : "text-emerald-400"
+                      )}>
+                        {bot.blocker && ["FEE_HARD_SUSPENSION_ACTIVE", "FEE_SOFT_SUSPENSION_ACTIVE", "BELOW_PREFERRED_SAFETY_TARGET"].includes(bot.blocker)
+                          ? "Risk Reduced"
+                          : "Balanced"}
+                      </p>
+                    </div>
+                  </>
+                )}
                 {/* Market Regime */}
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
                   <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Market Regime</p>
@@ -1112,29 +1094,6 @@ function AppContent() {
                   <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Expectancy After Fees</p>
                   <p className="text-xl font-black text-white">${bot.analytics?.expectancyAfterFees !== undefined ? bot.analytics.expectancyAfterFees.toFixed(2) : "0.00"}</p>
                 </div>
-                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
-                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">TP/SL Health</p>
-                  <p className={cn("text-xs font-black uppercase mt-1", bot.openPositions === 0 || bot.protectionStatus === "CONFIRMED" ? "text-emerald-400" : "text-rose-400")}>
-                    {bot.openPositions === 0 ? "Ready" : bot.protectionReadiness || bot.protectionStatus || "Unknown"}
-                  </p>
-                  <p className="text-[8px] text-slate-500 truncate" title={bot.telemetry?.currentProtectionIssue || "No active issue"}>
-                    TP {bot.telemetry?.activeTpCount ?? 0} / SL {bot.telemetry?.activeSlCount ?? 0} · {bot.telemetry?.currentProtectionIssue || "No active issue"}
-                  </p>
-                </div>
-                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
-                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">All-Time Gain / Loss</p>
-                  <p className="text-sm font-black text-white">
-                    <span className="text-emerald-400">+${(bot.analytics?.largestWin || 0).toFixed(2)}</span>
-                    <span className="text-slate-600 px-1">/</span>
-                    <span className="text-rose-400">-${Math.abs(bot.analytics?.largestLoss || 0).toFixed(2)}</span>
-                  </p>
-                </div>
-                <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60 font-mono">
-                  <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Net PnL</p>
-                  <p className={cn("text-xl font-black", (bot.analytics?.netProfitability || 0) >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                    ${(bot.analytics?.netProfitability || 0).toFixed(2)}
-                  </p>
-                </div>
               </div>
             </div>
 
@@ -1150,13 +1109,6 @@ function AppContent() {
                   <SnapshotMetric label="Expectancy" value={bot.analytics?.expectancyAfterFees !== undefined ? `$${bot.analytics.expectancyAfterFees.toFixed(2)}` : "$0.00"} color={(bot.analytics?.expectancyAfterFees || 0) >= 0 ? "emerald" : "rose"} />
                   <SnapshotMetric label="Best Trade" value={bot.analytics?.largestWin !== undefined ? `+$${bot.analytics.largestWin.toFixed(2)}` : "$0.00"} color="emerald" />
                   <SnapshotMetric label="Worst Trade" value={bot.analytics?.largestLoss !== undefined ? `-$${Math.abs(bot.analytics.largestLoss).toFixed(2)}` : "$0.00"} color="rose" />
-                  <SnapshotMetric label="Average Winner" value={`$${(bot.analytics?.avgWin || 0).toFixed(2)}`} color="emerald" />
-                  <SnapshotMetric label="Average Loser" value={`$${Math.abs(bot.analytics?.avgLoss || 0).toFixed(2)}`} color="rose" />
-                  <SnapshotMetric label="Winner/Loser" value={`${(bot.analytics?.winnerLoserRatio || 0).toFixed(2)}x`} color={(bot.analytics?.winnerLoserRatio || 0) >= 1 ? "emerald" : "rose"} />
-                  <SnapshotMetric label="Avg Hold" value={formatDuration(bot.analytics?.averageTradeDuration || 0)} />
-                  <SnapshotMetric label="Runner Captures" value={bot.analytics?.runnerCaptureCount || 0} color="emerald" />
-                  <SnapshotMetric label="Premature Blocks" value={bot.analytics?.prematureExitCount || 0} />
-                  <SnapshotMetric label="Micro-Scalp Blocks" value={bot.analytics?.microScalpExitBlockedCount || 0} />
                 </div>
               </div>
             )}

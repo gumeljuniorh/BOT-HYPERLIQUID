@@ -30,11 +30,6 @@ export interface BotConfig {
   stopLossPct: number;
   takeProfitPct: number;
   minEntrySize?: number;
-  minSignalConfidence?: number;
-  minTradeQualityScore?: number;
-  minExpectedMovePct?: number;
-  maxFeeToExpectedRewardRatio?: number;
-  maxOpenPositions?: number;
 }
 
 export interface ScannerOpportunity {
@@ -96,6 +91,7 @@ export interface BotState {
   blocker: string | null;
   apiConnected: boolean;
   wssConnected: boolean;
+  apiRateLimitUntil?: number;
   wssReconnectAttempts?: number;
   lastWssTime?: number;
   accountEquity: number;
@@ -181,12 +177,8 @@ export interface BotState {
     isLateButTradeable?: boolean;
     requiresTightTrailing?: boolean;
     isChopRecovery?: boolean;
-    runnerCaptureModeActive?: boolean;
-    microScalpExitBlockedCount?: number;
-    prematureExitBlockedCount?: number;
   };
   protectionStatus?: "CONFIRMED" | "MISSING" | "REPAIRING" | "FAILED_EMERGENCY_CLOSE_REQUIRED";
-  protectionReadiness?: "PROTECTION_READY_FOR_EXECUTION" | "TP_SL_REPAIR_COMPLETED" | "REPAIRING" | "FAILED" | null;
   cooldownUntil?: number;
   cooldownType?: "HARD" | "SOFT" | "LOSS_COOLDOWN" | "WIN_COOLDOWN" | "CHOP_COOLDOWN" | "VOLATILITY_RESET_COOLDOWN" | "NARRATIVE_CONTINUATION_COOLDOWN" | "EARLY_REENTRY_COOLDOWN";
   lastCooldownSymbol?: string;
@@ -248,10 +240,6 @@ export interface BotState {
     lessons: string[];
     updatedAt: number;
     averageTradeDuration?: number;
-    winnerLoserRatio?: number;
-    runnerCaptureCount?: number;
-    prematureExitCount?: number;
-    microScalpExitBlockedCount?: number;
     winLossByMarketRegime?: Record<string, { wins: number; losses: number; winRate: number }>;
     bestRegime?: string;
     worstRegime?: string;
@@ -358,11 +346,6 @@ export interface BotState {
     duplicateProtectionWarnings: number;
     protectionSyncHealth: string;
     lastProtectionSync?: number;
-    currentProtectionIssue?: string;
-    repairRequired?: boolean;
-    repairInProgress?: boolean;
-    lastRepairAction?: string;
-    lastRepairCompletedAt?: number;
   };
   circuitBreakerHistory?: CircuitBreakerEvent[];
   missedRunnerTracking?: {
@@ -443,9 +426,6 @@ export interface TradeLog {
   unrealizedMaxDrawdown?: number;
   maxFavorableMove?: number;
   maxAdverseMove?: number;
-  microScalpExitBlockedCount?: number;
-  prematureExitBlockedCount?: number;
-  runnerCaptureActivated?: boolean;
   duration?: number;
   entryReason?: string;
   exitReason?: string;
@@ -553,3 +533,4 @@ export interface CMCTrendIntelligence {
   narrativeHeat?: { name: string; score: number; trend: "STRENGTHENING" | "WEAKENING" | "EMERGING" | "FADING"; representativeSymbols: string[] }[];
   watchlist?: WatchlistAsset[];
 }
+

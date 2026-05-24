@@ -22,15 +22,17 @@ export class HyperliquidExecutionEngine {
   async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean) {
     const side = isBuy ? 'BUY' : 'SELL';
     console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly}`);
-
-    if (!reduceOnly && !canOpenNewEntry()) {
-      console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active. Reason=${botState.slotReductionReason || "UNKNOWN"} configured=${botState.configuredMaxPositions} effective=${botState.effectiveMaxPositions} used=${botState.usedPositions} available=${botState.availableSlots}`);
-      botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
-      return null;
-    }
-
-    if (reduceOnly) {
-      console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only protection/exit order allowed regardless of slot state.`);
+    
+    // NEW: Add slot check for non-reduce-only orders (entry orders only)
+    if (!reduceOnly) {
+      if (!canOpenNewEntry()) {
+        console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
+        botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
+        return null;
+      }
+    } else {
+      // Reduce-only orders (TP/SL) bypass slot restrictions
+      console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only order allowed regardless of slot state`);
     }
 
     if (config.DRY_RUN) {
@@ -41,7 +43,7 @@ export class HyperliquidExecutionEngine {
       
       // Manually adjust botState for paper mode visualization
       if (!reduceOnly) {
-        botState.openPositions = Math.max(1, botState.openPositions || 0);
+        botState.openPositions = (botState.openPositions || 0) + 1;
         botState.positionDetails = {
            coin: symbol,
            szi: isBuy ? sz.toString() : (-sz).toString(),
@@ -51,12 +53,11 @@ export class HyperliquidExecutionEngine {
         // Recalculate slots after position change
         calculatePositionSlots();
       } else {
-        botState.openPositions = 0;
+        botState.openPositions = Math.max(0, (botState.openPositions || 0) - 1);
         botState.positionDetails = null;
         // Recalculate slots after position change
         calculatePositionSlots();
       }
-      calculatePositionSlots();
       return { status: "ok", oid };
     } else {
       // Real exchange request
@@ -77,6 +78,7 @@ export class HyperliquidExecutionEngine {
         return null;
       }
 
+
       const action = {
         type: "order",
         orders: [{
@@ -85,7 +87,7 @@ export class HyperliquidExecutionEngine {
           p: formattedPx,
           s: formattedSz,
           r: reduceOnly,
-          t: { limit: { tif: reduceOnly ? "Gtc" : "Ioc" } }
+          t: { limit: { tif: "Gtc" } }
         }],
         grouping: "na"
       };
@@ -99,6 +101,7 @@ export class HyperliquidExecutionEngine {
             botState.lastOrderId = status.resting.oid.toString();
             botState.lastFillPrice = px;
             botState.lastApiError = null;
+            // Recalculate slots after successful order
             if (!reduceOnly) {
               calculatePositionSlots();
             }
@@ -107,12 +110,19 @@ export class HyperliquidExecutionEngine {
             botState.lastOrderId = status.filled.oid.toString();
             botState.lastFillPrice = parseFloat(status.filled.avgPx);
             botState.lastApiError = null;
+            // Recalculate slots after fill
             calculatePositionSlots();
             return result;
           } else if (status.error) {
             console.error(`Order returned API error: ${status.error}`);
             botState.lastApiError = status.error;
             
+            if (status.error.includes("Too many cumulative requests sent")) {
+               botState.apiRateLimitUntil = Date.now() + 60000;
+               botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+               console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit.`);
+            }
+
             // Special handling for reduceOnly errors
             if (status.error.includes("Reduce only order would increase position")) {
                console.log("REDUCE_ONLY_EXCEEDED: This usually means the position is already being closed or is smaller than requested.");
@@ -128,6 +138,12 @@ export class HyperliquidExecutionEngine {
         }
         console.error("Order failed:", errorDetail);
         botState.lastApiError = errorDetail;
+        
+        if (errorDetail.includes("Too many cumulative requests sent")) {
+           botState.apiRateLimitUntil = Date.now() + 60000;
+           botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+           console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit.`);
+        }
       }
       return null;
     }
@@ -149,6 +165,10 @@ export class HyperliquidExecutionEngine {
 
     try {
       const result = await hClient.exchangeRequest(action);
+      if (result && result.status === "err" && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
+         botState.apiRateLimitUntil = Date.now() + 60000;
+         botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+      }
       return result && result.status === "ok";
     } catch (e) {
       console.error(`Failed to cancel order ${oid}:`, e);
@@ -174,6 +194,10 @@ export class HyperliquidExecutionEngine {
 
     try {
       const result = await hClient.exchangeRequest(action);
+      if (result && result.status === "err" && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
+         botState.apiRateLimitUntil = Date.now() + 60000;
+         botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+      }
       return result && result.status === "ok";
     } catch (e) {
       console.error("Failed to cancel orders:", e);
@@ -254,7 +278,11 @@ export class HyperliquidExecutionEngine {
     if (cancels.length > 0) {
        console.log(`[PROTECTION_RECONCILIATION] Executing ${cancels.length} cancellations for ${symbol}.`);
        try {
-           await hClient.exchangeRequest({ type: "cancel", cancels });
+           const cancelResult = await hClient.exchangeRequest({ type: "cancel", cancels });
+           if (cancelResult && cancelResult.status === "err" && typeof cancelResult.response === "string" && cancelResult.response.includes("Too many cumulative requests sent")) {
+               botState.apiRateLimitUntil = Date.now() + 60000;
+               botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+           }
            // Optimistically remove cancelled orders from local state
            const cancelOids = cancels.map(c => String(c.o));
            botState.activeOrders = botState.activeOrders.filter(o => !cancelOids.includes(String(o.oid)));
@@ -307,6 +335,10 @@ export class HyperliquidExecutionEngine {
          return true;
       } else {
          console.error(`[EXECUTOR] Failed to place TP/SL orders: `, result);
+         if (result && result.response && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
+             botState.apiRateLimitUntil = Date.now() + 60000;
+             botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+         }
          return false;
       }
     } catch (e) {
