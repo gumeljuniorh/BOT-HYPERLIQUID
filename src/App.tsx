@@ -954,7 +954,16 @@ function AppContent() {
                 <HealthIndicator label="WSS" status={bot.wssConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="API" status={bot.apiConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="Margin" status={bot.availableMargin >= 40 ? "Healthy" : bot.availableMargin >= 20 ? "Warning" : "Critical"} />
-                <HealthIndicator label="Protection Health" status={bot.openPositions === 0 ? "Healthy" : (bot.protectionStatus === "CONFIRMED" ? "Healthy" : "Warning")} />
+                <HealthIndicator
+                  label="Protection Health"
+                  status={
+                    bot.openPositions === 0 ||
+                    bot.telemetry?.protectionSyncHealth === "HEALTHY" ||
+                    (bot.protectionStatus === "CONFIRMED" && (bot.telemetry?.activeSlCount || 0) >= 1)
+                      ? "Healthy"
+                      : "Warning"
+                  }
+                />
                 {isAdvancedMode && <HealthIndicator label="Learning Engine" status="Healthy" />}
               </div>
             </div>

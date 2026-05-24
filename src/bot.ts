@@ -543,9 +543,11 @@ export async function syncAccountState() {
       const feeBleedExtremelyHigh = ((botState as any).feeEfficiency?.feeToProfitRatio >= 0.85) || ((botState.analytics as any)?.feeToProfitRatio >= 0.85);
       const protectionInstability = botState.protectionStatus === "FAILED_EMERGENCY_CLOSE_REQUIRED" || botState.blocker === "CRITICAL_FAILURE";
 
-      const deservesEscalationToHard = drawdownPct >= 10.0 || 
-                                       repeatedLossesContinue || 
-                                       feeBleedExtremelyHigh || 
+      const severeDrawdownActive = drawdownPct >= 10.0;
+      const severeDrawdownWithLossPattern = drawdownPct >= 5.0 && (repeatedLossesContinue || feeBleedExtremelyHigh);
+      const deservesEscalationToHard =
+                                       severeDrawdownActive ||
+                                       severeDrawdownWithLossPattern ||
                                        protectionInstability;
 
       let severity: "NONE" | "SOFT" | "SOFT_LEVEL_1" | "SOFT_LEVEL_2" | "MODERATE" | "HARD" = oldSeverity;
@@ -586,15 +588,15 @@ export async function syncAccountState() {
         }
       }
 
-      // Sanity Guard
-      if (severity === "HARD" && drawdownPct <= 0.5 && recoveryRequired <= 0) {
+      // Sanity Guard: tiny drawdowns must never remain classified as HARD unless protection is corrupt.
+      if (severity === "HARD" && drawdownPct < 2.5 && !protectionInstability) {
          severity = "NONE";
          botState.drawdownPauseUntil = 0;
          if (botState.blocker === "HARD_DRAWDOWN_PAUSE_ACTIVE") {
              botState.blocker = null;
          }
          botState.analytics.lastDrawdownClearedAt = Date.now();
-         console.log(`[FALSE_HARD_DRAWDOWN_PREVENTED] Drawdown is 0% and fully recovered, removing HARD_DRAWDOWN.`);
+         console.log(`[FALSE_HARD_DRAWDOWN_PREVENTED] Drawdown ${drawdownPct.toFixed(2)}% is below hard threshold and protection is stable. Removing HARD_DRAWDOWN.`);
          console.log(`[DRAWDOWN_STATE_CLEARED] Drawdown mode cleared safely.`);
       }
       
