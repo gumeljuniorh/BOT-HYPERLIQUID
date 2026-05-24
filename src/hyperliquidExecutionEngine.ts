@@ -2,6 +2,7 @@ import { botState, getAssetId, getAssetMeta } from "./state.js";
 import { config } from "./config.js";
 import { hClient } from "./hyperliquidClient.js";
 import { calculatePositionSlots, canOpenNewEntry } from "./services/positionSlotCalculator.js";
+import { executionValidationGuard } from "./services/executionValidationGuard.js";
 
 export function formatHyperliquidPrice(px: number): string {
   if (px <= 0 || isNaN(px) || !isFinite(px)) return "0";
@@ -20,6 +21,18 @@ export function formatHyperliquidPrice(px: number): string {
 
 export class HyperliquidExecutionEngine {
   async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean, isIoc: boolean = false) {
+    const validation = executionValidationGuard.validateOrderIntent({ symbol, isBuy, size: sz, price: px, reduceOnly });
+    if (!validation.allowed) {
+      console.warn(`[ORDER_VALIDATION_REJECTED] ${symbol} reason=${validation.reason} size=${sz} price=${px} minNotional=${validation.minNotional.toFixed(2)} finalNotional=${validation.finalNotional.toFixed(2)}`);
+      botState.lastApiError = validation.reason;
+      if (!reduceOnly && validation.reason.includes("COOLDOWN")) {
+        botState.blocker = validation.reason;
+      }
+      return null;
+    }
+
+    sz = validation.roundedSize;
+    px = validation.roundedPrice;
     const side = isBuy ? 'BUY' : 'SELL';
     console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly} isIoc=${isIoc}`);
     
@@ -72,13 +85,6 @@ export class HyperliquidExecutionEngine {
 
       const formattedPx = formatHyperliquidPrice(px);
       
-      // Hyperliquid doesn't like prices <= 0
-      if (px <= 0) {
-        console.error("Attempted to place order with price <= 0:", px);
-        return null;
-      }
-
-
       const action = {
         type: "order",
         orders: [{
@@ -206,6 +212,21 @@ export class HyperliquidExecutionEngine {
   }
 
   async placeTpSlOrders(symbol: string, isLongPosition: boolean, sz: number, tpPrice: number | null, slPrice: number) {
+    const slValidation = executionValidationGuard.validateOrderIntent({ symbol, isBuy: !isLongPosition, size: Math.abs(sz), price: slPrice, reduceOnly: true });
+    if (!slValidation.allowed) {
+      console.warn(`[TP_SL_VALIDATION_REJECTED] ${symbol} SL rejected: ${slValidation.reason}`);
+      botState.lastApiError = slValidation.reason;
+      return false;
+    }
+    if (tpPrice !== null && tpPrice !== undefined) {
+      const tpValidation = executionValidationGuard.validateOrderIntent({ symbol, isBuy: !isLongPosition, size: Math.abs(sz), price: tpPrice, reduceOnly: true });
+      if (!tpValidation.allowed) {
+        console.warn(`[TP_SL_VALIDATION_REJECTED] ${symbol} TP rejected: ${tpValidation.reason}`);
+        botState.lastApiError = tpValidation.reason;
+        return false;
+      }
+    }
+
     if (config.DRY_RUN) {
       console.log(`[DRY_RUN] Placed TP/SL for ${symbol}. TP: ${tpPrice}, SL: ${slPrice}`);
       return true;
