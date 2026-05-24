@@ -1,7 +1,7 @@
 import { botState } from "../state.js";
 
 export function calculatePositionSlots(): void {
-  const configuredMax = 3;
+  const configuredMax = botState.config?.maxOpenPositions || 3;
   const used = botState.openPositions || 0;
   
   botState.configuredMaxPositions = configuredMax;

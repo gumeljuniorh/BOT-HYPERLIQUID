@@ -32,6 +32,29 @@ export class HyperliquidRiskManager {
       return false;
     }
 
+    const now = Date.now();
+    const dailyLossLimit = botState.accountEquity * ((botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT) / 100);
+    const realizedNet = botState.analytics?.netProfitability || botState.realizedPnl || 0;
+    if (dailyLossLimit > 0 && realizedNet <= -dailyLossLimit) {
+      botState.blocker = "DAILY_LOSS_LIMIT_REACHED";
+      console.warn(`[PHASE_1_SAFETY_CONFIG] Daily loss limit enforced. realized=${realizedNet.toFixed(2)}, limit=-${dailyLossLimit.toFixed(2)}.`);
+      return false;
+    }
+
+    const entriesLastHour = (botState.trades || []).filter((trade) => trade.type === "ENTRY" && now - trade.timestamp < 60 * 60 * 1000).length;
+    if (entriesLastHour >= config.MAX_TRADES_PER_HOUR) {
+      botState.blocker = "OVERTRADING_PROTECTION_ACTIVE";
+      console.warn(`[PHASE_1_SAFETY_CONFIG] Overtrading protection active. entriesLastHour=${entriesLastHour}, max=${config.MAX_TRADES_PER_HOUR}.`);
+      return false;
+    }
+
+    const reservePct = botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT;
+    if ((botState.freeCollateralPct || 100) < reservePct) {
+      botState.blocker = "BALANCE_RESERVE_REQUIRED";
+      console.warn(`[PHASE_1_SAFETY_CONFIG] Balance reserve enforced. freeCollateral=${(botState.freeCollateralPct || 0).toFixed(1)}%, reserve=${reservePct}%.`);
+      return false;
+    }
+
     if (botState.phase === "PHASE_0_STABILIZATION") {
       if (botState.activeSymbol !== "SOL") {
         botState.blocker = "PHASE_0: SOL ONLY";

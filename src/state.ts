@@ -1,7 +1,7 @@
 import { BotState } from "./types.js";
 import { config } from "./config.js";
 
-let _phase: any = "PHASE_2_ADAPTIVE_EXECUTION";
+let _phase: any = config.PHASE_ONE_CONSERVATIVE ? "PHASE_1_CONTROLLED_LIVE" : "PHASE_2_ADAPTIVE_EXECUTION";
 
 export const botState: BotState = {
   dryRun: config.DRY_RUN,
@@ -10,11 +10,8 @@ export const botState: BotState = {
   },
   set phase(v: any) {
     let target = v;
-    if (v === "PHASE_1_CONTROLLED_LIVE") {
-      target = "PHASE_2_ADAPTIVE_EXECUTION";
-    }
     const oldPhase = _phase;
-    if (oldPhase === "PHASE_2_ADAPTIVE_EXECUTION" && target !== "PHASE_2_ADAPTIVE_EXECUTION" && target !== "CIRCUIT_BREAKER_ACTIVE" && !target.startsWith("VALIDATION_") && target !== "PAPER_MODE_ACTIVE") {
+    if (oldPhase === "PHASE_2_ADAPTIVE_EXECUTION" && target !== "PHASE_2_ADAPTIVE_EXECUTION" && target !== "PHASE_1_CONTROLLED_LIVE" && target !== "CIRCUIT_BREAKER_ACTIVE" && !target.startsWith("VALIDATION_") && target !== "PAPER_MODE_ACTIVE") {
       console.log(`[NO_PHASE_DOWNGRADE_ARCHITECTURE] Attempted block downgrade to ${target}. Retaining unified PHASE_2_ADAPTIVE_EXECUTION.`);
       return;
     }

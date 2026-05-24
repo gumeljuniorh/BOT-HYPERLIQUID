@@ -7381,6 +7381,7 @@ async function loop() {
         await validationRunner.runValidationTrade();
       } else if (
         botState.phase === "PHASE_0_STABILIZATION" ||
+        botState.phase === "PHASE_1_CONTROLLED_LIVE" ||
         botState.phase === "PHASE_2_ADAPTIVE_EXECUTION" ||
         botState.phase === "PAPER_MODE_ACTIVE"
       ) {
@@ -7410,6 +7411,8 @@ export async function startBotEngine() {
   _engineStarted = true;
   console.log("Starting Bot Engine...");
   console.log("[CLOUD_RUNTIME_INITIALIZED] Bot engine initialized as a singleton.");
+  console.log(`[EXECUTION_MODE_CONFIRMED] ${config.DRY_RUN ? "DRY_RUN" : "LIVE"} mode active. Secrets are not printed.`);
+  console.log(`[PHASE_1_SAFETY_CONFIG] Conservative controls: maxOpenPositions=${botState.config.maxOpenPositions || 3}, minEntrySize=$${botState.config.minEntrySize || 40}, dailyLossLimitPct=${botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT}, balanceReservePct=${botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT}, microScalpMode=${botState.config.microScalpModeEnabled ? "ENABLED" : "DISABLED"}.`);
 
   // Set pending status explicitly on startup
   botState.validationStatus = "PENDING";
