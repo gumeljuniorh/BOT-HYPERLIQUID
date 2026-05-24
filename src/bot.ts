@@ -3104,38 +3104,50 @@ async function handleTradingLogic(isEmergencyMode = false) {
                 }
 
                 if (blockerCode === "PASSED") {
+                  const dynamicMinRequired = targetExposure < PREFERRED_ENTRY_SIZE ? absoluteExecutableMinimum : minimumUserRequiredSize;
+                  (opp as any).scannerPreliminarySize = targetExposure;
+                  (opp as any).scannerPreferredSize = PREFERRED_ENTRY_SIZE;
+                  (opp as any).scannerMinimumExecutableSize = absoluteExecutableMinimum;
+                  (opp as any).scannerSizingDecision = passesSizingScreening ? "PRELIMINARY_PASS" : "DEFERRED_TO_FINAL_ROUTER";
+
                   if (!passesSizingScreening) {
-                    blockerCode = "ENTRY_REJECTED_TOO_SMALL";
+                    console.log(`[SIZING_SOURCE_RECONCILED] ${sym}: scanner preliminary size $${targetExposure.toFixed(2)} did not meet local screening, but scanner will defer to final router sizing source of truth.`);
+                  }
+
+                  const minMarginRequired = (dynamicMinRequired / setupLeverage) * 1.01;
+                  if (botState.accountEquity < minMarginRequired || botState.availableMargin < minMarginRequired) {
+                    blockerCode = "INSUFFICIENT_FREE_COLLATERAL";
                   } else {
-                    const dynamicMinRequired = targetExposure < PREFERRED_ENTRY_SIZE ? absoluteExecutableMinimum : minimumUserRequiredSize;
-                    const minMarginRequired = (dynamicMinRequired / setupLeverage) * 1.01;
-                    if (botState.accountEquity < minMarginRequired || botState.availableMargin < minMarginRequired) {
+                    const estimatedIm = targetExposure / setupLeverage;
+                    const estimatedFeesAndSlippage = targetExposure * 0.005;
+                    const estimatedRequiredMargin = estimatedIm + estimatedFeesAndSlippage;
+                    const estimatedAvailableMarginAfterEntry = botState.availableMargin - estimatedRequiredMargin;
+                    const estimatedFreeCollateralPct = botState.accountEquity > 0
+                      ? (estimatedAvailableMarginAfterEntry / botState.accountEquity) * 100
+                      : 0;
+
+                    const dynamicLimitObj = getDynamicMaxPositions();
+                    const limit = dynamicLimitObj.limit;
+                    const requiredFreePct = botState.openPositions >= limit ? 35 : 30;
+                    const freeCollateralOk = estimatedFreeCollateralPct >= requiredFreePct;
+
+                    if (!freeCollateralOk || estimatedAvailableMarginAfterEntry <= 0) {
                       blockerCode = "INSUFFICIENT_FREE_COLLATERAL";
                     } else {
-                      const estimatedIm = targetExposure / setupLeverage;
-                      const estimatedFeesAndSlippage = targetExposure * 0.005;
-                      const estimatedRequiredMargin = estimatedIm + estimatedFeesAndSlippage;
-                      const estimatedAvailableMarginAfterEntry = botState.availableMargin - estimatedRequiredMargin;
-                      const estimatedFreeCollateralPct = botState.accountEquity > 0
-                        ? (estimatedAvailableMarginAfterEntry / botState.accountEquity) * 100
-                        : 0;
+                      const assetSizeDecimals = assetMeta ? assetMeta.szDecimals || 2 : 2;
+                      const rawBaseSize = targetExposure / markPrice;
+                      const multiplier = Math.pow(10, assetSizeDecimals);
+                      const roundedBaseSize = Math.floor(rawBaseSize * multiplier + 1e-7) / multiplier;
+                      const preliminaryNotional = roundedBaseSize * markPrice;
 
-                      const dynamicLimitObj = getDynamicMaxPositions();
-                      const limit = dynamicLimitObj.limit;
-                      const requiredFreePct = botState.openPositions >= limit ? 35 : 30;
-                      const freeCollateralOk = estimatedFreeCollateralPct >= requiredFreePct;
-
-                      if (!freeCollateralOk || estimatedAvailableMarginAfterEntry <= 0) {
-                        blockerCode = "INSUFFICIENT_FREE_COLLATERAL";
+                      if (roundedBaseSize <= 0) {
+                        blockerCode = "POSITION_SIZE_INVALID";
                       } else {
-                        const assetSizeDecimals = assetMeta ? assetMeta.szDecimals || 2 : 2;
-                        const rawBaseSize = targetExposure / markPrice;
-                        const multiplier = Math.pow(10, assetSizeDecimals);
-                        const roundedBaseSize = Math.floor(rawBaseSize * multiplier + 1e-7) / multiplier;
-
-                        if (roundedBaseSize <= 0 || roundedBaseSize * markPrice < dynamicMinRequired * 0.95) {
-                          blockerCode = "POSITION_SIZE_INVALID";
-                        } else {
+                        if (preliminaryNotional < dynamicMinRequired * 0.95) {
+                          console.log(`[SIZING_CONTRADICTION_DETECTED] ${sym}: scanner preliminary notional $${preliminaryNotional.toFixed(2)} is below dynamic min $${dynamicMinRequired.toFixed(2)}, deferring to final router reconciliation.`);
+                          console.log(`[SIZING_SOURCE_RECONCILED] ${sym}: scanner-stage size rejection suppressed; final router will approve or reject using reconciled executable size.`);
+                          (opp as any).scannerSizingDecision = "PRELIMINARY_TOO_SMALL_ROUTER_RECONCILES";
+                        }
                           const overtradingPauseEnd = botState.overtradingPauseUntil || 0;
                           const noTradeEnd = botState.noTradeUntil || 0;
                           // Continuation Re-entry bypass
@@ -3205,7 +3217,6 @@ async function handleTradingLogic(isEmergencyMode = false) {
                     }
                   }
                 }
-              }
             }
           }
         }
@@ -4536,7 +4547,12 @@ async function handleTradingLogic(isEmergencyMode = false) {
           // return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
       }
 
-      // Same-symbol re-entry guard and churn protection (Issue 2)
+      // Same-symbol re-entry guard and churn protection.
+      // This guard prevents true churn/revenge entries, while fresh high-quality structures flow through at reduced risk.
+      (botState as any).sameSymbolReentrySoftGuardActive = false;
+      (botState as any).sameSymbolReentrySizeModifier = 1;
+      (botState as any).sameSymbolReentryLeverageCap = null;
+      (botState as any).sameSymbolHardReentryGuardActive = false;
       const lastTradesOnSymbol = botState.trades.filter(t => t.symbol === botState.activeSymbol && t.type === "EXIT");
       if (lastTradesOnSymbol.length > 0) {
         const lastExit = lastTradesOnSymbol[lastTradesOnSymbol.length - 1];
@@ -4559,38 +4575,115 @@ async function handleTradingLogic(isEmergencyMode = false) {
         // Churn detection within the last 15 minutes
         const exitsLast15Mins = lastTradesOnSymbol.filter(t => (now - t.timestamp) < 15 * 60 * 1000);
         const isChurnActive = exitsLast15Mins.length >= 2;
-        if (isChurnActive) {
-          (botState as any).churnRiskActive = true;
-          console.log(`[CHURN_RISK_DETECTED] Churn risk detected on ${botState.activeSymbol} (${exitsLast15Mins.length} exits last 15 mins). Instatting REDUCED_SIZE and CONFIDENCE_FLOOR overrides.`);
-        } else {
-          (botState as any).churnRiskActive = false;
+        (botState as any).churnRiskActive = isChurnActive;
+
+        const lastExitPrice = lastExit.exitPrice || lastExit.fillPrice || botState.lastFillPrice || (botState.markPrices ? botState.markPrices[botState.activeSymbol] : 0);
+        const currentPriceLocal = botState.markPrices ? botState.markPrices[botState.activeSymbol] : 0;
+        const priceMovementPct = lastExitPrice > 0 && currentPriceLocal > 0
+          ? Math.abs(currentPriceLocal - lastExitPrice) / lastExitPrice * 100
+          : 0;
+        const atrPctLocal = Math.max(0.05, signal.atrPct || 0.25);
+        const meaningfulMoveThresholdPct = Math.max(0.15, Math.min(0.75, atrPctLocal * 0.6));
+        const priceMovedAway = priceMovementPct >= meaningfulMoveThresholdPct;
+
+        const normalizedTrend = (signal.trendStrength || 0) > 1 ? (signal.trendStrength || 0) / 100 : (signal.trendStrength || 0);
+        const normalizedMomentum = (signal.momentumScore || 0) > 1 ? (signal.momentumScore || 0) / 100 : (signal.momentumScore || 0);
+        const freshBreakoutConfirmed =
+          (signal.consecutiveCandlesCount || 0) >= 2 ||
+          /BREAKOUT|CONTINUATION|MOMENTUM|TREND/i.test(signal.marketRegime || "");
+        const momentumPersistenceImproved =
+          normalizedMomentum >= 0.55 ||
+          (signal.continuationConfidence || 0) >= 55 ||
+          signal.confidence >= 70;
+        const trendPersistenceHealthy = normalizedTrend >= 0.04 || signal.confidence >= 70;
+        const trendDirectionStillValid =
+          signal.direction !== "NONE" &&
+          (signal.rawDirection === undefined || signal.rawDirection === "NONE" || signal.rawDirection === signal.direction);
+        const volumeLiquidityHealthy =
+          (botState.marketScanner?.liquidityScore || 100) >= 60 &&
+          (botState.marketScanner?.spreadQuality || 100) >= 60;
+        const cmcRotateSupport = !!botState.cmcIntelligence?.assets.some(a =>
+          (a.matchedSymbol === botState.activeSymbol || a.symbol === botState.activeSymbol) &&
+          (a.narrative === botState.cmcIntelligence?.strongestNarrative || (a.momentumPersistenceScore || 0) >= 65 || a.trendScore >= 70)
+        );
+        const estimatedRoundTripCostPct = 0.14 + Math.max(0.01, (100 - (botState.marketScanner?.spreadQuality || 100)) / 100 * 0.1);
+        const rewardFeeRatio = estimatedRoundTripCostPct > 0 ? (signal.expectedMovePct || 0) / estimatedRoundTripCostPct : 0;
+        const rewardFeeHealthy = rewardFeeRatio >= 2.2 || (signal.expectedMovePct || 0) >= 0.45;
+        const confidenceStrong = signal.confidence >= 65 || (signal.tradeQualityScore || 0) >= 65;
+        const setupQualityWeak = signal.confidence < 50 && (signal.tradeQualityScore || 0) < 50;
+        const sameDirectionRepeat = lastExit.side === signal.direction;
+        const sameDirectionImmediate = sameDirectionRepeat && timeSinceExitSeconds < Math.min(requiredDelaySec, 90);
+        const noCurrentPositionOpen = !botState.allPositions?.some((p) => p.coin === botState.activeSymbol) && botState.openPositions === 0;
+        const hardSafetyContextClean =
+          noCurrentPositionOpen &&
+          botState.wssConnected !== false &&
+          botState.apiConnected !== false &&
+          (botState.availableSlots === undefined || botState.availableSlots > 0) &&
+          (botState.freeCollateralPct === undefined || botState.freeCollateralPct >= 30);
+
+        const hasFreshStructure =
+          priceMovedAway &&
+          freshBreakoutConfirmed &&
+          momentumPersistenceImproved &&
+          trendPersistenceHealthy &&
+          trendDirectionStillValid &&
+          volumeLiquidityHealthy &&
+          (cmcRotateSupport || rewardFeeHealthy || confidenceStrong);
+
+        const isWithinReentryWindow = timeSinceExitSeconds < requiredDelaySec;
+        const trueChurnBlock =
+          isWithinReentryWindow &&
+          sameDirectionImmediate &&
+          !hasFreshStructure &&
+          !priceMovedAway &&
+          setupQualityWeak &&
+          !rewardFeeHealthy;
+        const repeatedExitChurnBlock =
+          isChurnActive &&
+          !hasFreshStructure &&
+          (setupQualityWeak || !rewardFeeHealthy);
+        const hardReentryBlock = trueChurnBlock || repeatedExitChurnBlock;
+        const softReentryGuard = (isWithinReentryWindow || isChurnActive) && !hardReentryBlock;
+        const guardDecision = hardReentryBlock
+          ? "HARD_REENTRY_GUARD"
+          : hasFreshStructure && hardSafetyContextClean
+            ? "APPROVED_FRESH_STRUCTURE"
+            : softReentryGuard
+              ? "SOFT_REENTRY_GUARD"
+              : "CLEAR";
+
+        (botState as any).sameSymbolReentryGuardTrace = {
+          symbol: botState.activeSymbol,
+          lastExitTime,
+          lastExitReason: lastExit.exitReason || exitTypeLabel,
+          timeSinceExitSeconds,
+          sameDirectionRepeat,
+          priceMovementPct,
+          meaningfulMoveThresholdPct,
+          freshStructure: hasFreshStructure,
+          rewardFeeRatio,
+          decision: guardDecision
+        };
+
+        console.log(`[REENTRY_GUARD_TRACE] symbol=${botState.activeSymbol} lastExitTime=${new Date(lastExitTime).toISOString()} lastExitReason=${lastExit.exitReason || exitTypeLabel} timeSinceExit=${timeSinceExitSeconds.toFixed(0)}s sameDirection=${sameDirectionRepeat} priceMove=${priceMovementPct.toFixed(3)}% threshold=${meaningfulMoveThresholdPct.toFixed(3)}% freshStructure=${hasFreshStructure} rewardFeeRatio=${rewardFeeRatio.toFixed(2)} noPosition=${noCurrentPositionOpen} hardSafetyContextClean=${hardSafetyContextClean} decision=${guardDecision}`);
+
+        if (hardReentryBlock) {
+          (botState as any).sameSymbolHardReentryGuardActive = true;
+          console.log(`[SAME_SYMBOL_REENTRY_HARD_BLOCK] ${botState.activeSymbol} blocked because this matches true churn/revenge-entry conditions.`);
+          console.log(`[REENTRY_BLOCKED_TRUE_CHURN] ${botState.activeSymbol} timeSinceExit=${timeSinceExitSeconds.toFixed(0)}s sameDirection=${sameDirectionRepeat} priceMovedAway=${priceMovedAway} setupQualityWeak=${setupQualityWeak} rewardFeeHealthy=${rewardFeeHealthy} churn=${isChurnActive}`);
+          botState.blocker = "SAME_SYMBOL_REENTRY_HARD_BLOCK";
+          return botState.blocker;
         }
 
-        if (timeSinceExitSeconds < requiredDelaySec) {
-          // Check for FRESH STRUCTURE confirmation criteria
-          const lastExitPrice = lastExit.exitPrice || lastExit.fillPrice || botState.lastFillPrice || (botState.markPrices ? botState.markPrices[botState.activeSymbol] : 0);
-          const currentPriceLocal = botState.markPrices ? botState.markPrices[botState.activeSymbol] : 0;
-          const priceMovedAway = lastExitPrice > 0 && currentPriceLocal > 0 ? (Math.abs(currentPriceLocal - lastExitPrice) / lastExitPrice * 100 >= 0.5) : false;
-          
-          const proposedSlPctLocal = (getAssetMeta(botState.activeSymbol) && getAssetMeta(botState.activeSymbol).maxLeverage <= 3) ? 2.5 : 1.5;
-          const expMoveLocal = signal.expectedMovePct || 1.0;
-          const proposedTpPctLocal = Math.max(proposedSlPctLocal * 0.25, expMoveLocal * 0.9);
-          const rrRatioLocal = proposedSlPctLocal > 0 ? (proposedTpPctLocal / proposedSlPctLocal) : 0;
+        if (softReentryGuard) {
+          (botState as any).sameSymbolReentrySoftGuardActive = true;
+          (botState as any).sameSymbolReentrySizeModifier = isChurnActive ? 0.5 : 0.65;
+          (botState as any).sameSymbolReentryLeverageCap = 2;
+          console.log(`[SAME_SYMBOL_REENTRY_SOFT_GUARD] ${botState.activeSymbol} recent same-symbol exit detected. Warning only: size/leverage reduced, execution still allowed if final router passes.`);
+        }
 
-          const freshBreakoutConfirmed = (signal.consecutiveCandlesCount || 0) >= 3;
-          const strongTrendPersistence = (signal.trendStrength || 0) >= 0.040;
-          const cmcRotateSupport = botState.cmcIntelligence?.assets.some(a => (a.matchedSymbol === botState.activeSymbol || a.symbol === botState.activeSymbol) && a.narrative === botState.cmcIntelligence?.strongestNarrative);
-          const rewardFeeHealthy = rrRatioLocal >= 0.35;
-
-          const hasFreshStructure = priceMovedAway && freshBreakoutConfirmed && strongTrendPersistence && (cmcRotateSupport || rewardFeeHealthy);
-
-          if (hasFreshStructure && !isChurnActive) {
-            console.log(`[REENTRY_APPROVED_FRESH_STRUCTURE] Same-symbol faster re-entry approved for ${botState.activeSymbol}. Fresh continuation pattern holds.`);
-          } else {
-            console.log(`[SAME_SYMBOL_REENTRY_GUARD_ACTIVE] Guard blocked re-entry on ${botState.activeSymbol} (${exitTypeLabel}). Cool-off: ${timeSinceExitSeconds.toFixed(0)}s / ${requiredDelaySec}s. Churn: ${isChurnActive}`);
-            botState.blocker = "SAME_SYMBOL_REENTRY_GUARD_ACTIVE";
-            return botState.blocker;
-          }
+        if (hasFreshStructure && hardSafetyContextClean) {
+          console.log(`[REENTRY_APPROVED_FRESH_STRUCTURE] Same-symbol re-entry approved for ${botState.activeSymbol}. Fresh structure, healthy reward/fee, clean safety, and available slot confirmed.`);
         }
       }
 
@@ -5440,10 +5533,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
         let finalDecision = "APPROVED";
         let finalExposure = Math.min(targetExposure, safeExposure);
 
-        // If same-symbol churn risk is active, reduce size by 50% as requested
-        if ((botState as any).churnRiskActive) {
+        // Same-symbol soft re-entry guard is risk shaping only. The hard guard already returned above.
+        const sameSymbolReentryModifier = (botState as any).sameSymbolReentrySizeModifier || 1;
+        if ((botState as any).sameSymbolReentrySoftGuardActive && sameSymbolReentryModifier < 1) {
+          finalExposure *= sameSymbolReentryModifier;
+          if ((botState as any).sameSymbolReentryLeverageCap) {
+            setupLeverage = Math.min(setupLeverage, (botState as any).sameSymbolReentryLeverageCap);
+          }
+          console.log(`[SAME_SYMBOL_REENTRY_SOFT_GUARD] Size/leverage adjusted for ${botState.activeSymbol}: modifier=${sameSymbolReentryModifier.toFixed(2)}, leverageCap=${(botState as any).sameSymbolReentryLeverageCap || "NONE"}.`);
+        } else if ((botState as any).churnRiskActive) {
           finalExposure *= 0.5;
-          console.log(`[CHURN_RISK_ACTIVE_SIZE_REDUCED] Active churn risk: reduced final exposure size by 50% to $${finalExposure.toFixed(2)}`);
+          setupLeverage = Math.min(setupLeverage, 2);
+          console.log(`[CHURN_RISK_ACTIVE_SIZE_REDUCED] Churn risk reduced final exposure by 50% to $${finalExposure.toFixed(2)} without creating a hidden execution freeze.`);
           console.log(`CHURN_RISK_DETECTED: Reducing trade size to prevent excessive trading friction.`);
         }
 
@@ -5483,9 +5584,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
            if (reqConf < 15) reqConf = 15;
         }
 
-        if ((botState as any).churnRiskActive) {
-           reqConf = Math.max(reqConf, 75); // Require stronger confirmation for churn risk
-           console.log(`[CHURN_RISK_ACTIVE_CONFIRMATION_ENFORCED] Active churn risk: elevated required confidence to at least 75% (currently ${reqConf}%).`);
+        if ((botState as any).sameSymbolHardReentryGuardActive) {
+           reqConf = Math.max(reqConf, 75);
+           console.log(`[CHURN_RISK_ACTIVE_CONFIRMATION_ENFORCED] Hard same-symbol churn risk: elevated required confidence to at least 75% (currently ${reqConf}%).`);
+        } else if ((botState as any).sameSymbolReentrySoftGuardActive || (botState as any).churnRiskActive) {
+           console.log(`[SAME_SYMBOL_REENTRY_SOFT_GUARD] Recent same-symbol/churn risk is handled by size and leverage only; confidence threshold remains ${reqConf}%.`);
         }
         
         reqConf = Math.max(15, Math.min(80, reqConf)); // Ensure hard floor/ceiling limits for safety
@@ -5695,6 +5798,27 @@ async function handleTradingLogic(isEmergencyMode = false) {
             console.log(`[SOFT_RISK_LEVERAGE_REDUCTION_APPLIED] Reducing leverage from ${oldLev}x to ${setupLeverage}x due to soft-risk dampeners.`);
           }
         }
+
+        const scannerPreliminarySize = currentOpp ? (currentOpp as any).scannerPreliminarySize : undefined;
+        const routerPreferredSize = PREFERRED_ENTRY_SIZE;
+        const routerMinimumExecutableSize = absoluteExecutableMinimum;
+        const routerMinimumRequired = botState.entryTier === "STANDARD_ENTRY" ? routerPreferredSize : routerMinimumExecutableSize;
+        const sizingFinalDecision = targetExposure >= routerMinimumExecutableSize * 0.95 ? "APPROVED" : "POSITION_SIZE_INVALID";
+
+        if (typeof scannerPreliminarySize === "number" && Math.abs(scannerPreliminarySize - targetExposure) > 0.01) {
+          console.log(`[SIZING_CONTRADICTION_DETECTED] ${botState.activeSymbol}: scanner preliminary size $${scannerPreliminarySize.toFixed(2)} differs from final router size $${targetExposure.toFixed(2)}.`);
+        }
+        console.log(`[SIZING_RECONCILIATION_TRACE] symbol=${botState.activeSymbol} scannerPreliminarySize=$${(typeof scannerPreliminarySize === "number" ? scannerPreliminarySize : targetExposure).toFixed(2)} routerFinalSize=$${targetExposure.toFixed(2)} preferredSize=$${routerPreferredSize.toFixed(2)} minimumExecutableSize=$${routerMinimumExecutableSize.toFixed(2)} finalBlocker=${sizingFinalDecision === "APPROVED" ? "NONE" : sizingFinalDecision} finalApproval=${sizingFinalDecision}`);
+
+        if (sizingFinalDecision === "APPROVED") {
+          console.log(`[FINAL_ROUTER_SIZE_APPROVED] ${botState.activeSymbol}: final executable notional $${targetExposure.toFixed(2)} clears minimum $${routerMinimumRequired.toFixed(2)} for tier ${botState.entryTier}.`);
+          console.log(`[SIZING_SOURCE_RECONCILED] ${botState.activeSymbol}: final router size is authoritative for execution.`);
+        }
+
+        botState.actualEntrySize = targetExposure;
+        _targetExposure = targetExposure;
+        _setupLeverage = setupLeverage;
+        _sym = botState.activeSymbol;
 
         // Calculate Protection Parameters
         let tpPct = botState.config.takeProfitPct || 2.0;
