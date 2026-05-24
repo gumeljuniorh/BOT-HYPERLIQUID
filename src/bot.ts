@@ -2861,7 +2861,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
   // Manage execution attempts & cool down handling
   if (!botState.telemetry) botState.telemetry = { activeTpCount: 0, activeSlCount: 0, duplicateProtectionWarnings: 0, protectionSyncHealth: "OK" };
-  const maxRouterCandidates = (botState.phase === "PHASE_2_ADAPTIVE_EXECUTION" && (botState.marketScanner?.regimeScore || 0) > 70) ? 5 : 3;
+  const maxRouterCandidates = (botState.phase === "PHASE_2_ADAPTIVE_EXECUTION" && (botState.marketScanner?.confidenceRanking || 0) > 70) ? 5 : 3;
   const eligibleOpps = opportunities.filter(o => o.eligibility === "ELIGIBLE");
   eligibleOpps.sort((a, b) => (a.executionPriorityRank || 999) - (b.executionPriorityRank || 999));
 
@@ -5905,6 +5905,20 @@ async function handleTradingLogic(isEmergencyMode = false) {
          _traceBlocker = "API_RATE_LIMIT_EXCEEDED";
       } else {
          _traceBlocker = await executeEntryAndGetBlocker();
+      }
+
+      if (_traceBlocker !== "PASSED" && _traceBlocker !== "ORDER_SUBMITTED_SUCCESSFULLY") {
+          if (_traceBlocker === "POSITION_SIZE_INVALID") {
+              botState.positionSizeInvalidCooldowns = botState.positionSizeInvalidCooldowns || {};
+              botState.positionSizeInvalidCooldowns[_sym] = Date.now() + 300000;
+              botState.telemetry.sizingInvalidCooldownCount = (botState.telemetry.sizingInvalidCooldownCount || 0) + 1;
+              console.warn(`[ROUTER_POSITION_SIZE_INVALID_COOLDOWN] Applied 5m cooldown to ${_sym}.`);
+          } else if (_traceBlocker === "EXECUTION_ROUTER_BLOCKED" || _traceBlocker.startsWith("ENTRY_BLOCKED") || _traceBlocker.startsWith("TP_SL_PRECHECK_FAILED") || _traceBlocker.endsWith("REJECTED")) {
+              botState.routerBlockCooldowns = botState.routerBlockCooldowns || {};
+              botState.routerBlockCooldowns[_sym] = Date.now() + 60000;
+              botState.telemetry.routerBlockCooldownCount = (botState.telemetry.routerBlockCooldownCount || 0) + 1;
+              console.warn(`[ROUTER_BLOCK_RETRY_COOLDOWN] Applied 60s cooldown to ${_sym} for ${_traceBlocker}.`);
+          }
       }
 
       const astMeta = getAssetMeta(_sym);

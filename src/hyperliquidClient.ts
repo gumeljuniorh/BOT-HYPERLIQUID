@@ -164,10 +164,12 @@ export class HyperliquidClient {
             return { status: "error", response: responseText };
           }
           
-          if (parsed && parsed.status === "err" && typeof parsed.response === "string" && parsed.response.includes("Too many cumulative requests sent")) {
-             console.error(`[API_RATE_LIMIT_GLOBAL] Hyperliquid cumulative request rate limit hit!`);
-             // We return it anyway so callers can handle it to pause logic.
-             return parsed;
+          if (parsed && parsed.status === "err") {
+             const strResp = JSON.stringify(parsed);
+             if (strResp.includes("Too many cumulative requests sent")) {
+                 console.error(`[API_RATE_LIMIT_GLOBAL] Hyperliquid cumulative request rate limit hit!`);
+                 return parsed;
+             }
           }
           
           return parsed;

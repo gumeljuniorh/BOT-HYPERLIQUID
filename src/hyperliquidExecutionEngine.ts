@@ -337,10 +337,12 @@ export class HyperliquidExecutionEngine {
          console.log(`[PROTECTION_RECONCILIATION_COMPLETED] Protection synced for ${symbol}.`);
          return true;
       } else {
-         console.error(`[EXECUTOR] Failed to place TP/SL orders: `, result);
-         if (result && result.response && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
+         const errDetail = JSON.stringify(result || {});
+         console.error(`[EXECUTOR] Failed to place TP/SL orders: `, errDetail);
+         if (errDetail.includes("Too many cumulative requests sent") || (result && result.response && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent"))) {
              botState.apiRateLimitUntil = Date.now() + 60000;
              botState.blocker = "API_RATE_LIMIT_EXCEEDED";
+             console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit (TP/SL trigger).`);
          }
          return false;
       }
