@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "Trade": {
+      "title": "Trade",
+      "description": "Comprehensive trade log entry including multi-dimensional metadata for the analytics engine",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "venue": { "type": "string" },
+        "symbol": { "type": "string" },
+        "side": { "type": "string", "enum": ["LONG", "SHORT"] },
+        "entryPrice": { "type": "number" },
+        "exitPrice": { "type": "number" },
+        "orderId": { "type": "string" },
+        "closeOrderId": { "type": "string" },
+        "leverage": { "type": "number" },
+        "size": { "type": "number" },
+        "notional": { "type": "number" },
+        "fees": { "type": "number" },
+        "slippage": { "type": "number" },
+        "grossPnl": { "type": "number" },
+        "netPnl": { "type": "number" },
+        "realizedPnl": { "type": "number" },
+        "unrealizedMaxGain": { "type": "number" },
+        "unrealizedMaxDrawdown": { "type": "number" },
+        "duration": { "type": "number" },
+        "entryReason": { "type": "string" },
+        "exitReason": { "type": "string" },
+        "confidenceScore": { "type": "number" },
+        "trendScore": { "type": "number" },
+        "momentumScore": { "type": "number" },
+        "volatilityScore": { "type": "number" },
+        "fundingRate": { "type": "number" },
+        "marketRegime": { "type": "string" },
+        "apiLatency": { "type": "number" },
+        "wssHealth": { "type": "string" },
+        "reconciliationResult": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "symbol", "side"]
+    },
+    "TradeAnalysis": {
+      "title": "TradeAnalysis",
+      "description": "Computed metrics and AI-driven insights for the trading system",
+      "type": "object",
+      "properties": {
+        "totalTrades": { "type": "number" },
+        "winRate": { "type": "number" },
+        "avgWin": { "type": "number" },
+        "avgLoss": { "type": "number" },
+        "largestWin": { "type": "number" },
+        "largestLoss": { "type": "number" },
+        "cumulativeFees": { "type": "number" },
+        "netProfitability": { "type": "number" },
+        "currentDrawdown": { "type": "number" },
+        "lessons": { "type": "array" },
+        "recommendations": { "type": "array" },
+        "updatedAt": { "type": "number" }
+      }
+    }
+  },
+  "firestore": {
+    "/trades/{tradeId}": {
+      "schema": "Trade",
+      "description": "Audit trail of every execution"
+    },
+    "/analytics/global": {
+      "schema": "TradeAnalysis",
+      "description": "Global performance overview"
+    }
+  }
+}

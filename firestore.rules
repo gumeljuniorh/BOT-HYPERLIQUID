@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email == 'gumeljuniorh@gmail.com';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation for Trade entity
+    function isValidTrade(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'symbol', 'side']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.timestamp is number &&
+             data.symbol is string && data.symbol.size() <= 32 &&
+             data.side in ['LONG', 'SHORT'] &&
+             (data.get('notional', 0) is number) &&
+             (data.get('entryPrice', 0) is number);
+    }
+
+    // Trades collection
+    match /trades/{tradeId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidTrade(incoming());
+      allow update: if false; // Append-only
+      allow delete: if false;
+    }
+
+    // Analytics collection
+    match /analytics/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
