@@ -1,6 +1,7 @@
 import { botState, getAssetId, getAssetMeta } from "./state.js";
 import { config } from "./config.js";
 import { hClient } from "./hyperliquidClient.js";
+import { calculatePositionSlots, canOpenNewEntry } from "./services/positionSlotCalculator.js";
 
 export function formatHyperliquidPrice(px: number): string {
   if (px <= 0 || isNaN(px) || !isFinite(px)) return "0";
@@ -22,6 +23,18 @@ export class HyperliquidExecutionEngine {
     const side = isBuy ? 'BUY' : 'SELL';
     console.log(`[EXECUTOR] Requesting ${symbol} ${side} size=${sz.toFixed(4)} px=${px.toFixed(2)} reduceOnly=${reduceOnly}`);
     
+    // NEW: Add slot check for non-reduce-only orders (entry orders only)
+    if (!reduceOnly) {
+      if (!canOpenNewEntry()) {
+        console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
+        botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
+        return null;
+      }
+    } else {
+      // Reduce-only orders (TP/SL) bypass slot restrictions
+      console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only order allowed regardless of slot state`);
+    }
+    
     if (config.DRY_RUN) {
       // Simulate fill in bot state for dashboard awareness
       const oid = `MOCK-${Math.floor(Math.random() * 1000000)}`;
@@ -37,9 +50,13 @@ export class HyperliquidExecutionEngine {
            entryPx: px.toString(),
            unrealizedPnl: "0"
         };
+        // Recalculate slots after position change
+        calculatePositionSlots();
       } else {
         botState.openPositions = 0;
         botState.positionDetails = null;
+        // Recalculate slots after position change
+        calculatePositionSlots();
       }
       return { status: "ok", oid };
     } else {
@@ -60,7 +77,6 @@ export class HyperliquidExecutionEngine {
         console.error("Attempted to place order with price <= 0:", px);
         return null;
       }
-
 
       const action = {
         type: "order",
@@ -84,11 +100,17 @@ export class HyperliquidExecutionEngine {
             botState.lastOrderId = status.resting.oid.toString();
             botState.lastFillPrice = px;
             botState.lastApiError = null;
+            // Recalculate slots after successful order
+            if (!reduceOnly) {
+              calculatePositionSlots();
+            }
             return result;
           } else if (status.filled) {
             botState.lastOrderId = status.filled.oid.toString();
             botState.lastFillPrice = parseFloat(status.filled.avgPx);
             botState.lastApiError = null;
+            // Recalculate slots after fill
+            calculatePositionSlots();
             return result;
           } else if (status.error) {
             console.error(`Order returned API error: ${status.error}`);
