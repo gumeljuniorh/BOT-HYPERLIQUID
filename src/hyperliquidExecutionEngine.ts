@@ -189,6 +189,12 @@ export class HyperliquidExecutionEngine {
 
   async cancelAllOrders(symbol?: string) {
     const coin = symbol || botState.activeSymbol;
+    if (config.DRY_RUN) {
+      console.log(`[DRY_RUN] Canceling all open orders for ${coin}.`);
+      botState.activeOrders = (botState.activeOrders || []).filter(o => o.coin !== coin);
+      return true;
+    }
+
     console.log(`Canceling all open orders for ${coin}.`);
     
     // Find orders for this coin

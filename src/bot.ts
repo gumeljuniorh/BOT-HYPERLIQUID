@@ -652,12 +652,20 @@ export async function syncAccountState() {
     botState.marginUsed = parseFloat(info.marginSummary.totalMarginUsed);
 
     // Check positions across all assets
-    const activePositions = info.assetPositions.filter(
-      (p: any) => parseFloat(p.position.szi) !== 0,
-    );
-    const openPositionsCount = activePositions.length;
+    let openPositionsCount = 0;
+    let activePositions: any[] = [];
 
-    if (openPositionsCount > 0) {
+    if (config.DRY_RUN) {
+      console.log(`[DRY_RUN_RECONCILIATION] Bypassed overwriting simulated positions with real exchange state.`);
+      openPositionsCount = botState.allPositions ? botState.allPositions.length : 0;
+      botState.openPositions = openPositionsCount;
+    } else {
+      activePositions = info.assetPositions.filter(
+        (p: any) => parseFloat(p.position.szi) !== 0,
+      );
+      openPositionsCount = activePositions.length;
+
+      if (openPositionsCount > 0) {
       if (!(botState as any).protectionByCoin) {
           (botState as any).protectionByCoin = {};
       }
@@ -891,6 +899,7 @@ export async function syncAccountState() {
         console.log("[MONITORING_RESUMED_NO_OPEN_POSITIONS] Monitoring resumed: no active positions open. MONITORING_RESUMED_NO_OPEN_POSITIONS.");
       }
     }
+    }
 
     // Ghost position detection (Reconciliation Check) - trigger only if configured max is breached.
     // Conservative Phase 1 and adaptive Phase 2 both allow configured multi-position operation.
@@ -909,34 +918,38 @@ export async function syncAccountState() {
     }
 
     // Sync Open Orders
-    try {
-      const openOrders = await hClient.infoRequest({
-        type: "openOrders",
-        user: config.HYPERLIQUID_WALLET_ADDRESS,
-      });
-      botState.activeOrders = Array.isArray(openOrders) ? openOrders : [];
-      
-      // Track transitions for any pending resting entries that gets filled asynchronously
-      if (botState.entryOrdersContext && Object.keys(botState.entryOrdersContext).length > 0) {
-        const activeOids = new Set((botState.activeOrders || []).map(o => String(o.oid)));
-        for (const oid of Object.keys(botState.entryOrdersContext)) {
-          if (!activeOids.has(oid)) {
-            const ctx = botState.entryOrdersContext[oid];
-            const positionForSymbol = botState.allPositions && botState.allPositions.find(p => p.coin === ctx.symbol);
-            if (positionForSymbol) {
-              const sizeNum = parseFloat(positionForSymbol.szi);
-              const posSide = sizeNum > 0 ? "LONG" : "SHORT";
-              if (posSide === ctx.side) {
-                console.log(`[ORDER_FILLED_POSITION_OPENED] Pending entry order ${oid} for ${ctx.symbol} successfully filled asynchronously. Position is now open.`);
-                delete botState.entryOrdersContext[oid];
+    if (!config.DRY_RUN) {
+      try {
+        const openOrders = await hClient.infoRequest({
+          type: "openOrders",
+          user: config.HYPERLIQUID_WALLET_ADDRESS,
+        });
+        botState.activeOrders = Array.isArray(openOrders) ? openOrders : [];
+        
+        // Track transitions for any pending resting entries that gets filled asynchronously
+        if (botState.entryOrdersContext && Object.keys(botState.entryOrdersContext).length > 0) {
+          const activeOids = new Set((botState.activeOrders || []).map(o => String(o.oid)));
+          for (const oid of Object.keys(botState.entryOrdersContext)) {
+            if (!activeOids.has(oid)) {
+              const ctx = botState.entryOrdersContext[oid];
+              const positionForSymbol = botState.allPositions && botState.allPositions.find(p => p.coin === ctx.symbol);
+              if (positionForSymbol) {
+                const sizeNum = parseFloat(positionForSymbol.szi);
+                const posSide = sizeNum > 0 ? "LONG" : "SHORT";
+                if (posSide === ctx.side) {
+                  console.log(`[ORDER_FILLED_POSITION_OPENED] Pending entry order ${oid} for ${ctx.symbol} successfully filled asynchronously. Position is now open.`);
+                  delete botState.entryOrdersContext[oid];
+                }
               }
             }
           }
         }
+      } catch (e) {
+        console.warn("[SYNC] Failed to fetch open orders:", e);
+        botState.activeOrders = [];
       }
-    } catch (e) {
-      console.warn("[SYNC] Failed to fetch open orders:", e);
-      botState.activeOrders = [];
+    } else {
+      console.log(`[DRY_RUN] Retained simulated orders count: ${(botState.activeOrders || []).length}`);
     }
 
     // Compute Precise Separation Metrics (Requirement 1, 2 & 9)
@@ -1675,7 +1688,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
   // Manage existing positions?
   // For now, if we have a position, the bot manages the activeSymbol (primarily the first one).
   // But if we want to enter a new one, we switch activeSymbol to the best signal.
-  const signal =
+  let signal =
     canEnterNew && bestSignal
       ? bestSignal
       : strategy.getSignal(botState.activeSymbol);
@@ -3056,11 +3069,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
       
       if (isCbVal) {
         blockerCode = "PHASE_NOT_ACTIVE";
-      } else if (botState.validationStatus !== "SUCCESS") {
+      } else if (botState.validationStatus !== "SUCCESS" && !config.DRY_RUN) {
         blockerCode = "API_NOT_VERIFIED";
-      } else if (!botState.wssConnected) {
+      } else if (!botState.wssConnected && !config.DRY_RUN) {
         blockerCode = "WSS_INSTABILITY";
-      } else if (!botState.apiConnected) {
+      } else if (!botState.apiConnected && !config.DRY_RUN) {
         blockerCode = "ENTRY_ENGINE_DISABLED";
       } else {
         const exposureAllowed = botState.openPositions < limit && (botState.openPositions === 0 || dynamicMoreThanTwoAllowed);
@@ -3310,7 +3323,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
         console.log(`MARKET_ELIGIBILITY_CHECK: Evaluating ${sym} (Conf: ${sig.confidence}, Req: ${reqConf}, Regime: ${optRegime})`);
         
         // Add NOT_SELECTED_AS_BEST_SIGNAL constraint
-        if (blockerCode === "PASSED" && sym !== botState.activeSymbol) {
+        if (blockerCode === "PASSED" && !multiPositionMode && sym !== botState.activeSymbol) {
             blockerCode = "NOT_BEST_SIGNAL_SELECTED";
         }
 
@@ -3523,12 +3536,12 @@ async function handleTradingLogic(isEmergencyMode = false) {
   const isCooldown = (botState.cooldownUntil || 0) > now;
   const isReverseLock = (botState.reverseLockUntil || 0) > now;
 
-  if (botState.validationStatus !== "SUCCESS") {
+  if (botState.validationStatus !== "SUCCESS" && !config.DRY_RUN) {
     botState.blocker = "VALIDATION_NOT_SUCCESS";
     return;
   }
 
-  if (!botState.wssConnected || !botState.apiConnected) {
+  if ((!botState.wssConnected || !botState.apiConnected) && !config.DRY_RUN) {
     botState.blocker = "CONNECTION_LOST";
     return;
   }
@@ -3925,8 +3938,59 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
   // Phase 1 Rules: Only execute entries if completely flat (Requirement 15)
   // Phase 2 allows multiple entries
+  // Build selected candidates to enter
+  const currentLimitObj = getDynamicMaxPositions();
+  const currentLimit = currentLimitObj.limit;
+  const openPositions = botState.openPositions || 0;
+  const pendingCount = botState.activeOrders ? botState.activeOrders.filter(o => !o.reduceOnly).length : 0;
+  let availableSlots = currentLimit - openPositions - pendingCount;
+  if (availableSlots < 0) availableSlots = 0;
+
+  let candidatesToExecute: any[] = [];
   if (canEnterNew) {
-    if (signal.direction !== "NONE") {
+    if (multiPositionMode) {
+      // Find all eligible opportunities
+      const eligibleOpps = opportunities.filter(o => o.eligibility === "ELIGIBLE");
+      // Filter out those we already hold or have pending
+      const candidates = eligibleOpps.filter(opp => {
+         const s = opp.symbol;
+         const alreadyHolding = botState.allPositions && botState.allPositions.some((p: any) => p.coin === s);
+         const alreadyHasPending = botState.activeOrders && botState.activeOrders.some((o: any) => o.coin === s && !o.reduceOnly);
+         return !alreadyHolding && !alreadyHasPending;
+      });
+      // Sort candidates by preference (confidence descending)
+      candidates.sort((a, b) => {
+         const scoreA = a.confidence || a.finalScore || 0;
+         const scoreB = b.confidence || b.finalScore || 0;
+         return scoreB - scoreA;
+      });
+      // Take up to available slots
+      candidatesToExecute = candidates.slice(0, availableSlots);
+      console.log(`[MULTI_POSITION_PLAN] availableSlots=${availableSlots}, selectedCandidates=${candidatesToExecute.length}, symbols=${candidatesToExecute.map(c => c.symbol).join(", ")}`);
+    } else {
+      // Single-position mode fallback
+      const currentSignal = strategy.getSignal(botState.activeSymbol);
+      if (currentSignal.direction !== "NONE" && botState.openPositions === 0) {
+         const isHoldingBest = botState.allPositions && botState.allPositions.some((p: any) => p.coin === botState.activeSymbol);
+         if (!isHoldingBest) {
+            candidatesToExecute = [{ symbol: botState.activeSymbol, confidence: currentSignal.confidence, finalScore: highestScore }];
+         }
+      }
+    }
+  }
+
+  if (canEnterNew && candidatesToExecute.length > 0) {
+    for (const candidate of candidatesToExecute) {
+      const candidateSym = candidate.symbol;
+      const candidateSignal = strategy.getSignal(candidateSym);
+      
+      console.log(`[ENTRY_ATTEMPT] symbol=${candidateSym}, side=${candidateSignal.direction}, slotIndex=${botState.openPositions}, notional=${botState.config.maxExposure}`);
+
+      // Set active symbol context and signal so downstream code correctly references current candidate
+      botState.activeSymbol = candidateSym;
+      botState.markPrice = (botState.markPrices && botState.markPrices[candidateSym]) || botState.markPrice;
+      signal = candidateSignal;
+
       console.log(`ENTRY_SIGNAL: ${signal.direction} signal confirmed!`);
       if (botState.analytics?.TOO_CONSERVATIVE_OVERRIDE_ACTIVE) {
          console.log(`OVERRIDE_ENTRY_READY: Controlled execution ready for ${botState.activeSymbol}`);
@@ -6124,6 +6188,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
          if (botState.analytics.lessons.length < 5) {
             botState.analytics.lessons.push(`Missed execution on ${_sym} due to ${_traceBlocker}`);
          }
+         console.log(`[ENTRY_BLOCKED] symbol=${_sym}, reason=${_traceBlocker}`);
+      } else {
+         console.log(`[ENTRY_ACCEPTED] symbol=${_sym}, side=${signal.direction}, size=${_targetExposure}`);
+         // Increment open positions local count so next iteration is aware a slot is reserved
+         botState.openPositions = (botState.openPositions || 0) + 1;
       }
     }
   }
@@ -6761,15 +6830,27 @@ async function handleTradingLogic(isEmergencyMode = false) {
           let actualFees = Math.abs(sz * fillPrice * 0.00035);
 
           // 4. Confirm exchange reconciliation after exit
-          while (reconciliationRetries < 3 && !isReconciled) {
+          while (reconciliationRetries < 12 && !isReconciled) {
              await syncAccountState();
              const stillOpen = botState.allPositions?.find((p: any) => p.coin === botState.activeSymbol && parseFloat(p.szi) !== 0);
              if (!stillOpen) {
                  isReconciled = true;
                  break;
              }
+             
+             // Check if remaining position is negligible micro-dust (e.g. less than 0.0001 or < 0.20 USDC market value)
+             const dustSzi = Math.abs(parseFloat(stillOpen.szi));
+             const dustValue = dustSzi * (botState.markPrices?.[stillOpen.coin] || currentPrice);
+             if (dustValue < 0.20) {
+                 console.log(`[EXIT_RECONCILIATION_WARNING] Found micro-dust position of size ${dustSzi} (Value: $${dustValue.toFixed(4)}). Treating as reconciled.`);
+                 isReconciled = true;
+                 break;
+             }
+
              reconciliationRetries++;
-             await new Promise(r => setTimeout(r, 1000));
+             // Progressive delay backoff: from 800ms to 2400ms
+             const delayTime = Math.min(2500, 800 + reconciliationRetries * 200);
+             await new Promise(r => setTimeout(r, delayTime));
           }
 
           if (!isReconciled) {

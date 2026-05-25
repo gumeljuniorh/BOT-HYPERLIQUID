@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import "dotenv/config";
 import { startBotEngine } from "./bot.js";
 import { botState } from "./state.js";
+import { config } from "./config.js";
 
 
 async function startServer() {
@@ -49,14 +50,34 @@ async function startServer() {
   });
 
   app.post("/api/config", (req, res) => {
-    const { config } = req.body;
-    if (config) {
-      botState.config = { ...botState.config, ...config };
+    const { config: formConfig } = req.body;
+    if (formConfig) {
+      botState.config = { ...botState.config, ...formConfig };
       console.log("[SERVER] Bot config updated:", botState.config);
       res.json({ status: "ok", config: botState.config });
     } else {
       res.status(400).json({ error: "Missing config object" });
     }
+  });
+
+  app.post("/api/toggle-dry-run", (req, res) => {
+    const { dryRun } = req.body;
+    if (typeof dryRun === "boolean") {
+      config.DRY_RUN = dryRun;
+      botState.dryRun = dryRun;
+    } else {
+      config.DRY_RUN = !config.DRY_RUN;
+      botState.dryRun = config.DRY_RUN;
+    }
+
+    if (!config.DRY_RUN && botState.blocker === "DRY_RUN ENABLED") {
+      botState.blocker = null;
+    } else if (config.DRY_RUN) {
+      botState.blocker = "DRY_RUN ENABLED";
+    }
+
+    console.log(`[SERVER] DRY_RUN mode updated to: ${config.DRY_RUN ? "ENABLED (Simulation)" : "DISABLED (Live Trading)"}`);
+    res.json({ status: "ok", dryRun: botState.dryRun, blocker: botState.blocker });
   });
 
   app.post("/api/phase", (req, res) => {

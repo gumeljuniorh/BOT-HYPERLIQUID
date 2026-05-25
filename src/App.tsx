@@ -41,6 +41,7 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { ScannerPanel } from "./components/ScannerPanel";
 import { CoinMarketCapPanel } from "./components/CoinMarketCapPanel";
+import { SimpleDashboard } from "./components/SimpleDashboard";
 
 function formatPrice(px: number | string | null | undefined): string {
   if (px === null || px === undefined) return "N/A";
@@ -695,21 +696,26 @@ function AppContent() {
           animate={{ opacity: [0.4, 1, 0.4] }}
           transition={{ duration: 1.5, repeat: Infinity }}
         >
-          Initializing Zepoul Bot Perps...
+          Initializing Executor System...
         </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#0A0B0D] text-slate-300 font-sans flex flex-col overflow-hidden pb-[120px] xl:pb-0">
+    <div className="min-h-screen bg-[#0B0E11] text-[#EAECEF] font-sans flex flex-col overflow-hidden pb-[120px] xl:pb-0">
       {/* Header Section */}
-      <header className="h-16 shrink-0 border-b border-slate-800 bg-[#0F1115] px-4 md:px-6 flex items-center justify-between z-20">
+      <header className="h-14 shrink-0 border-b border-[#2B3139] bg-[#181A20] px-4 md:px-6 flex items-center justify-between z-20">
         <div className="flex items-center space-x-3 md:space-x-4">
-          <div className="w-7 h-7 md:w-8 md:h-8 bg-[#8A4FFF] rounded flex items-center justify-center font-bold text-white shadow-[0_0_15px_rgba(138,79,255,0.4)]">Z</div>
+          <div className="w-6 h-6 md:w-7 md:h-7 bg-[#FCD535] rounded-sm flex items-center justify-center font-bold text-[#181A20]">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 0l4.33 7.5L25 12l-8.67 4.5L12 24l-4.33-7.5L-1 12l8.67-4.5L12 0z" />
+            </svg>
+          </div>
           <div>
-            <h1 className="text-xs md:text-sm font-bold tracking-[0.2em] text-white uppercase italic font-serif">
+            <h1 className="text-[13px] md:text-[15px] font-bold tracking-wide text-[#EAECEF] flex items-center gap-2">
               Zepoul Bot Perps
+              <span className="text-[10px] font-medium bg-[#2B3139] text-[#848E9C] px-1.5 py-0.5 rounded">BETA</span>
             </h1>
             <div className="hidden md:flex items-center space-x-3 mt-0.5">
               <StatusIndicator 
@@ -727,15 +733,71 @@ function AppContent() {
         </div>
 
         <div className="flex items-center space-x-4 md:space-x-6">
+          {/* Trading Execution Mode segmented control */}
+          <div className="flex bg-[#0B0E11] p-0.5 rounded border border-[#2B3139] items-center">
+            <button 
+              onClick={async () => {
+                try {
+                  const res = await fetch("/api/toggle-dry-run", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ dryRun: true })
+                  });
+                  if (res.ok) {
+                    const data = await res.json();
+                    setStatus((s: any) => s ? { ...s, bot: { ...s.bot, dryRun: data.dryRun, blocker: data.blocker } } : s);
+                  }
+                } catch (e) {
+                  console.error("Failed to toggle dry run mode:", e);
+                }
+              }}
+              className={cn(
+                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none gap-1",
+                bot.dryRun
+                  ? "bg-[#2B3139] text-amber-400"
+                  : "text-[#848E9C] hover:text-amber-400"
+              )}
+            >
+              <span className={cn("w-1.5 h-1.5 rounded-full", bot.dryRun ? "bg-amber-400" : "bg-transparent border border-[#848E9C]")}></span>
+              Simulated
+            </button>
+            <button 
+              onClick={async () => {
+                try {
+                  const res = await fetch("/api/toggle-dry-run", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ dryRun: false })
+                  });
+                  if (res.ok) {
+                    const data = await res.json();
+                    setStatus((s: any) => s ? { ...s, bot: { ...s.bot, dryRun: data.dryRun, blocker: data.blocker } } : s);
+                  }
+                } catch (e) {
+                  console.error("Failed to toggle dry run mode:", e);
+                }
+              }}
+              className={cn(
+                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none gap-1",
+                !bot.dryRun
+                  ? "bg-[#2B3139] text-[#0ECB81]"
+                  : "text-[#848E9C] hover:text-[#0ECB81]"
+              )}
+            >
+              <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", !bot.dryRun ? "bg-[#0ECB81]" : "bg-transparent border border-[#848E9C]")}></span>
+              Live Trading
+            </button>
+          </div>
+
           {/* Mode Toggle Segmented Control */}
-          <div className="flex bg-[#0C0E12] p-1 rounded-lg border border-slate-800/80">
+          <div className="flex bg-[#0B0E11] p-0.5 rounded border border-[#2B3139]">
             <button 
               onClick={() => handleSetAdvancedMode(false)}
               className={cn(
-                "px-3 py-1 text-[9px] font-black uppercase rounded-md tracking-wider transition-all h-6 flex items-center cursor-pointer border-none",
+                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none",
                 !isAdvancedMode 
-                  ? "bg-[#8A4FFF] text-white font-extrabold shadow-[0_0_10px_rgba(138,79,255,0.4)]" 
-                  : "text-slate-500 hover:text-slate-300"
+                  ? "bg-[#2B3139] text-[#EAECEF]" 
+                  : "text-[#848E9C] hover:text-[#EAECEF]"
               )}
             >
               Simple
@@ -743,28 +805,40 @@ function AppContent() {
             <button 
               onClick={() => handleSetAdvancedMode(true)}
               className={cn(
-                "px-3 py-1 text-[9px] font-black uppercase rounded-md tracking-wider transition-all h-6 flex items-center cursor-pointer border-none",
+                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none",
                 isAdvancedMode 
-                  ? "bg-[#8A4FFF] text-white font-extrabold shadow-[0_0_10px_rgba(138,79,255,0.4)]" 
-                  : "text-slate-500 hover:text-slate-300"
+                  ? "bg-[#2B3139] text-[#EAECEF]" 
+                  : "text-[#848E9C] hover:text-[#EAECEF]"
               )}
             >
               Advanced
             </button>
           </div>
 
-          <div className="flex items-center space-x-4 px-3 py-1.5 md:px-4 md:py-2 bg-black/40 border border-slate-800/50 rounded-full">
+          <button 
+            onClick={async () => {
+              try {
+                await fetch('/api/resume-all', { method: 'POST' });
+              } catch (e) {
+                console.error('Failed to resume:', e);
+              }
+            }} 
+            className="hidden sm:flex px-3 py-1.5 text-[11px] font-medium bg-[#2B3139] hover:bg-[#4A515B] text-[#EAECEF] rounded transition-colors items-center"
+          >
+            Resume Engine
+          </button>
+
+          <div className="flex items-center space-x-4 px-3 py-1 md:px-4 md:py-1 hover:bg-[#2B3139] transition-colors rounded cursor-pointer" onClick={() => setIsSettingsOpen(true)}>
             <div className="text-right hidden sm:block">
-              <p className="text-[8px] uppercase tracking-widest text-slate-500 font-bold leading-none mb-1">Mark Price</p>
-              <p className="text-xs font-mono font-bold text-white">${bot.markPrice.toFixed(2)}</p>
+              <p className="text-[10px] text-[#848E9C] leading-none mb-0.5">Mark Price</p>
+              <p className="text-xs font-mono font-bold text-[#EAECEF]">${bot.markPrice.toFixed(2)}</p>
             </div>
-            <div className="h-4 w-px bg-slate-800 hidden sm:block"></div>
-            <div className="text-right cursor-pointer group" onClick={() => setIsSettingsOpen(true)}>
-              <p className="text-[8px] uppercase tracking-widest text-slate-500 font-bold leading-none mb-1 group-hover:text-[#8A4FFF] transition-colors">Config</p>
-              <div className="flex items-center gap-1.5 justify-end">
-                <p className="text-[10px] md:text-xs font-mono font-bold text-[#8A4FFF]">{bot.phase || 'READY'}</p>
-                <SettingsIcon className="w-3 h-3 text-slate-600 group-hover:text-[#8A4FFF] group-hover:rotate-90 transition-all" />
-              </div>
+            <div className="h-6 w-px bg-[#2B3139] hidden sm:block"></div>
+            <div className="text-right">
+              <p className="text-[10px] text-[#848E9C] leading-none mb-0.5">Status</p>
+              <p className={cn("text-[11px] font-medium", bot.phase === "ACTIVE" ? "text-[#0ECB81]" : "text-[#FCD535]")}>
+                {bot.phase || 'READY'}
+              </p>
             </div>
           </div>
         </div>
@@ -779,6 +853,9 @@ function AppContent() {
         </div>
       )}
 
+      {!isAdvancedMode ? (
+         <SimpleDashboard bot={bot} blockerInfo={blockerInfo} isAdvancedMode={isAdvancedMode} setIsAdvancedMode={handleSetAdvancedMode} />
+      ) : (
       <main className="flex-1 flex flex-col xl:flex-row overflow-hidden relative">
         {/* Sidebar Panel */}
         {isAdvancedMode && (
@@ -953,7 +1030,6 @@ function AppContent() {
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono">
                 <HealthIndicator label="WSS" status={bot.wssConnected ? "Healthy" : "Critical"} />
                 <HealthIndicator label="API" status={bot.apiConnected ? "Healthy" : "Critical"} />
-                <HealthIndicator label="REST Budget" status={bot.apiBudget?.degradedMode ? "Warning" : "Healthy"} />
                 <HealthIndicator label="Margin" status={bot.availableMargin >= 40 ? "Healthy" : bot.availableMargin >= 20 ? "Warning" : "Critical"} />
                 <HealthIndicator label="Protection Health" status={bot.openPositions === 0 ? "Healthy" : (bot.protectionStatus === "CONFIRMED" ? "Healthy" : "Warning")} />
                 {isAdvancedMode && <HealthIndicator label="Learning Engine" status="Healthy" />}
@@ -1058,15 +1134,6 @@ function AppContent() {
                       </p>
                     </div>
                   </>
-                )}
-                {isAdvancedMode && (
-                  <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
-                    <p className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">REST Budget</p>
-                    <p className={cn("text-xs font-black uppercase font-mono mt-1", bot.apiBudget?.degradedMode ? "text-amber-400" : "text-emerald-400")}>
-                      {bot.apiBudget?.restRequestsInWindow ?? 0}/{bot.apiBudget?.restBudgetLimit ?? 0}
-                    </p>
-                    <p className="text-[9px] text-slate-600 truncate" title={bot.apiBudget?.throttleReason || "NONE"}>{bot.apiBudget?.throttleReason || "NONE"}</p>
-                  </div>
                 )}
                 {/* Market Regime */}
                 <div className="space-y-1 bg-black/30 p-3.5 rounded-xl border border-slate-800/60">
@@ -2081,6 +2148,7 @@ function AppContent() {
                   </div>
                   <div className="space-y-1.5">
                       <DiagnosticRow label="Last Order ID" value={bot.lastOrderId || "N/A"} />
+                      <DiagnosticRow label="Last Order Failure" value={bot.lastOrderFailureReason || "NONE"} status={bot.lastOrderFailureReason ? "error" : "neutral"} />
                       <DiagnosticRow label="Last Fill Price" value={bot.lastFillPrice ? `$${bot.lastFillPrice.toFixed(2)}` : "N/A"} />
                       <DiagnosticRow label="TP/SL Status" value={bot.openPositions > 0 ? (bot.protectionStatus || "CONFIRMED") : "N/A"} status={bot.openPositions === 0 ? "neutral" : (bot.protectionStatus === "CONFIRMED" ? "success" : "error")} />
                   </div>
@@ -3113,6 +3181,7 @@ function AppContent() {
           </div>
         </section>
       </main>
+      )}
 
       {/* Settings Modal */}
       <AnimatePresence>
@@ -3437,7 +3506,7 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      <ScannerPanel opportunities={bot.scannerOpportunities || []} activeSymbol={bot.activeSymbol} scansSinceLastEntry={bot.scansSinceLastEntry || 0} isAdvancedMode={isAdvancedMode} />
+      {false && <ScannerPanel opportunities={bot.scannerOpportunities || []} activeSymbol={bot.activeSymbol} scansSinceLastEntry={bot.scansSinceLastEntry || 0} isAdvancedMode={isAdvancedMode} />}
 
       <footer className="h-8 shrink-0 border-t border-slate-800 bg-[#0F1115] px-6 items-center justify-between text-[8px] font-mono flex pointer-events-none opacity-50">
         <div className="flex items-center space-x-4">

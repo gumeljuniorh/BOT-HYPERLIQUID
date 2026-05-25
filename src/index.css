@@ -1,1 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Inter:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Roboto", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Roboto", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  
+  --color-binance-gold: #FCD535;
+  --color-binance-gold-hover: #F0B90B;
+  --color-binance-green: #0ECB81;
+  --color-binance-red: #F6465D;
+  --color-binance-bg: #0B0E11;
+  --color-binance-panel: #181A20;
+  --color-binance-panel-border: #2B3139;
+  --color-binance-text: #EAECEF;
+  --color-binance-text-muted: #848E9C;
+}
+
+/* Custom Webkit scrollbar for professional clean layout */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #0B0E11;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #2B3139;
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #4A515B;
+}
+
+/* Professional solid panels */
+.glass-panel {
+  background-color: var(--color-binance-panel);
+  border: 1px solid var(--color-binance-panel-border);
+}
+
+.glass-panel-accent {
+  background-color: rgba(252, 213, 53, 0.05);
+  border: 1px solid var(--color-binance-panel-border);
+}
