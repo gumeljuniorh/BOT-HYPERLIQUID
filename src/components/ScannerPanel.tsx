@@ -327,6 +327,23 @@ export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, ac
                           <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
                              Narrative: <span className="text-rose-400 font-bold">{opt.narrative || "N/A"}</span>
                           </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Long / Short: <span className="text-emerald-400 font-bold">{opt.longScore ?? opt.longConfidence ?? "N/A"}</span>
+                             <span className="text-slate-600 mx-1">/</span>
+                             <span className="text-rose-400 font-bold">{opt.shortScore ?? opt.shortConfidence ?? "N/A"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Selected Side: <span className={cn("font-black", opt.selectedSide === "LONG" ? "text-emerald-400" : opt.selectedSide === "SHORT" ? "text-rose-400" : "text-slate-400")}>{opt.selectedSide || "NONE"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Setup: <span className="text-indigo-400 font-bold">{opt.setupType || "N/A"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             CMC Bias: <span className="text-amber-400 font-bold">{opt.cmcDirectionalBias || "NEUTRAL"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             HL Confirm: <span className="text-sky-400 font-bold">{opt.hlDirectionalConfirmation || "N/A"}</span>
+                          </div>
                       </div>
                   )}
 

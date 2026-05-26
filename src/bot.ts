@@ -11,6 +11,7 @@ import { tradeLogger } from "./tradeLogger.js";
 import { snapshotService } from "./services/snapshotService.js";
 import { coinMarketCapTrendScanner } from "./services/coinMarketCapTrendScanner.js";
 import { apiBudgetManager } from "./services/apiBudgetManager.js";
+import { buildUnifiedCandidateDecision } from "./services/unifiedCandidateDecision.js";
 import fs from "fs";
 import path from "path";
 
@@ -268,11 +269,14 @@ function isHardExecutionBlocker(reason?: string | null): boolean {
   return HARD_EXECUTION_BLOCKERS.some((hardReason) => reason.includes(hardReason));
 }
 
-function applySoftExecutionAdjustment(opp: any, reason: string, sizeMultiplier = 0.65, leverageMultiplier = 0.8): void {
-  (opp as any).sizeModifier = Math.min((opp as any).sizeModifier ?? 1.0, sizeMultiplier);
-  (opp as any).leverageModifier = Math.min((opp as any).leverageModifier ?? 1.0, leverageMultiplier);
+function applySoftExecutionAdjustment(opp: any, reason: string, sizeMultiplier = 0.65, leverageMultiplier = 1.0): void {
+  const adjustedSizeMultiplier = leverageMultiplier < 1
+    ? Math.max(0.25, sizeMultiplier * leverageMultiplier)
+    : sizeMultiplier;
+  (opp as any).sizeModifier = Math.min((opp as any).sizeModifier ?? 1.0, adjustedSizeMultiplier);
   (opp as any).softExecutionReason = reason;
-  console.log(`[SOFT_BLOCKER_CONVERTED_TO_RISK_ADJUSTMENT] ${opp.symbol || botState.activeSymbol} ${reason} converted to size/leverage/rank adjustment.`);
+  console.log(`[SOFT_BLOCKER_CONVERTED_TO_RISK_ADJUSTMENT] ${opp.symbol || botState.activeSymbol} ${reason} converted to size/rank adjustment.`);
+  console.log(`[SOFT_RISK_REDUCED_SIZE_NOT_LEVERAGE] ${opp.symbol || botState.activeSymbol} soft risk was absorbed into size/ranking so unified leverage remains authoritative.`);
 }
 
 export async function programmaticClosePosition(sym: string, reason: string): Promise<boolean> {
@@ -2853,6 +2857,74 @@ async function handleTradingLogic(isEmergencyMode = false) {
     }
     oFinalExecScore = Math.min(100, Math.max(0, Math.round(oFinalExecScore)));
 
+    const unifiedDecision = buildUnifiedCandidateDecision({
+      symbol: sym,
+      signal: oppSignal,
+      cmc: matchedCmc || null,
+      hlTechnicalScore: capConfidence,
+      liquidityScore,
+      spreadScore,
+      rewardFeeScore: feeAdjustedExpectedValue,
+      feePenalty,
+      trendMatch,
+      rejectionReason,
+      maxLeverage: meta?.maxLeverage || 15,
+      apiHealthy: isWebsocketHealthyScanner,
+      wssHealthy: isWebsocketHealthyScanner,
+      freeCollateralPct: botState.freeCollateralPct || 100,
+      drawdownSeverity: botState.drawdownSeverity || "NONE",
+      apiPressureActive: !!botState.apiBudget?.degradedMode || (!!botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil),
+      hardSafetyClean:
+        !!meta &&
+        !!price &&
+        price > 0 &&
+        isWebsocketHealthyScanner &&
+        isLqHealthyScanner &&
+        isFreeCollateralHealthyScanner &&
+        botState.protectionStatus !== "FAILED_EMERGENCY_CLOSE_REQUIRED"
+    });
+
+    unifiedDecision.logs.forEach((line) => console.log(line));
+    console.log(`[UNIFIED_CANDIDATE_DECISION] ${JSON.stringify({
+      symbol: sym,
+      selectedSide: unifiedDecision.selectedSide,
+      setupType: unifiedDecision.setupType,
+      leverageTier: unifiedDecision.leverageTier,
+      sizeTier: unifiedDecision.sizeTier,
+      finalExecutionScore: unifiedDecision.finalExecutionScore,
+      longScore: unifiedDecision.longScore,
+      shortScore: unifiedDecision.shortScore,
+      cmcDirectionalBias: unifiedDecision.cmcDirectionalBias,
+      hlDirectionalConfirmation: unifiedDecision.hlDirectionalConfirmation,
+      shouldEnter: unifiedDecision.shouldEnter,
+      reason: unifiedDecision.sideReason
+    })}`);
+
+    oFinalExecScore = unifiedDecision.finalExecutionScore;
+    directionDecision = unifiedDecision.directionDecision;
+    leverageSelectedScanner = unifiedDecision.leverageTier;
+    leverageReasonScanner = unifiedDecision.leverageReason;
+
+    if (unifiedDecision.selectedSide === "LONG" || unifiedDecision.selectedSide === "SHORT") {
+      if (oppSignal.direction !== unifiedDecision.selectedSide) {
+        console.log(`[FINAL_SIDE_SELECTED_BY_SCORE] ${sym} replacing legacy direction ${oppSignal.direction} with unified ${unifiedDecision.selectedSide}.`);
+      }
+      oppSignal.direction = unifiedDecision.selectedSide;
+      if (oppSignal.rawDirection === "NONE") {
+        oppSignal.rawDirection = unifiedDecision.selectedSide;
+      }
+      if (unifiedDecision.shouldEnter && isNonessentialExecutionBlocker(rejectionReason)) {
+        console.log(`[NO_BIAS_REJECTED_SIDE_EDGE_PRESENT] ${sym} nonessential rejection cleared because unified side edge is present.`);
+        rejectionReason = null;
+      }
+      if (unifiedDecision.shouldEnter && (eligibility === "WAITING" || eligibility === "NEAR_ENTRY")) {
+        eligibility = "ELIGIBLE";
+      }
+    } else if (eligibility === "ELIGIBLE") {
+      eligibility = "NEAR_ENTRY";
+      if (!rejectionReason) rejectionReason = "NO_DIRECTIONAL_EDGE";
+    }
+
     let directionalBias = "NEUTRAL";
     if (directionDecision === "LONG continuation") directionalBias = "LONG";
     else if (directionDecision === "SHORT continuation") directionalBias = "SHORT";
@@ -2879,7 +2951,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
        console.log(`[CONTRADICTION_DETECTED] ACTIVE_TARGET but rejected with NO_TRADE_SIGNAL. Likely signal confirmation lag. Bypassing state lock to HIGH_RISK_NEEDS_CONFIRMATION.`);
     }
 
-    const selectedSide = directionDecision.includes("LONG") ? "LONG" : directionDecision.includes("SHORT") ? "SHORT" : "NONE";
+    const selectedSide = unifiedDecision.selectedSide;
     const action = !price || price <= 0
       ? "BLOCKED_HARD_SAFETY"
       : eligibility === "ELIGIBLE"
@@ -2916,6 +2988,13 @@ async function handleTradingLogic(isEmergencyMode = false) {
       rejectionReason,
       finalScore: oFinalExecScore,
       selectedSide,
+      setupType: unifiedDecision.setupType,
+      leverageTier: unifiedDecision.leverageTier,
+      longScore: unifiedDecision.longScore,
+      shortScore: unifiedDecision.shortScore,
+      cmcDirectionalBias: unifiedDecision.cmcDirectionalBias,
+      hlDirectionalConfirmation: unifiedDecision.hlDirectionalConfirmation,
+      sideReason: unifiedDecision.sideReason,
       action
     })}`);
 
@@ -2947,6 +3026,15 @@ async function handleTradingLogic(isEmergencyMode = false) {
       reversalProbability: oppSignal.reversalProbability,
       exhaustionProbability: oppSignal.exhaustionProbability,
       trendPhase: oppSignal.trendPhase,
+      longScore: unifiedDecision.longScore,
+      shortScore: unifiedDecision.shortScore,
+      setupType: unifiedDecision.setupType,
+      leverageTier: unifiedDecision.leverageTier,
+      sizeTier: unifiedDecision.sizeTier,
+      cmcDirectionalBias: unifiedDecision.cmcDirectionalBias,
+      hlDirectionalConfirmation: unifiedDecision.hlDirectionalConfirmation,
+      sideReason: unifiedDecision.sideReason,
+      unifiedDecision: { ...unifiedDecision, logs: [] },
       eligibility,
       rejectionReason,
       trendMatch,
@@ -4253,10 +4341,26 @@ async function handleTradingLogic(isEmergencyMode = false) {
       const candidateSym = candidate.symbol;
       const candidateSignal = strategy.getSignal(candidateSym);
       const candidateSelectedSide = candidate.selectedSide || (candidate.directionalBias === "LONG" || candidate.directionalBias === "SHORT" ? candidate.directionalBias : "NONE");
-      if (candidateSignal.direction === "NONE" && (candidateSelectedSide === "LONG" || candidateSelectedSide === "SHORT")) {
+      if ((candidateSelectedSide === "LONG" || candidateSelectedSide === "SHORT") && candidateSignal.direction !== candidateSelectedSide) {
         candidateSignal.direction = candidateSelectedSide;
-        candidateSignal.rawDirection = candidateSelectedSide;
-        console.log(`[DIRECTIONAL_BIAS_SELECTED] ${candidateSym} router direction restored from scanner selectedSide=${candidateSelectedSide}.`);
+        if (candidateSignal.rawDirection === "NONE") {
+          candidateSignal.rawDirection = candidateSelectedSide;
+        }
+        console.log(`[DIRECTIONAL_BIAS_SELECTED] ${candidateSym} router direction set from unified selectedSide=${candidateSelectedSide}.`);
+      }
+      if (candidate.unifiedDecision) {
+        (botState as any).unifiedCandidateDecision = candidate.unifiedDecision;
+        botState.executionLeverageSelected = candidate.unifiedDecision.leverageTier;
+        botState.executionLeverageReason = candidate.unifiedDecision.leverageReason;
+        botState.executionDirectionDecision = candidate.unifiedDecision.directionDecision;
+        candidateSignal.confidence = Math.max(candidateSignal.confidence || 0, candidate.unifiedDecision.finalExecutionScore || 0);
+        candidateSignal.tradeQualityScore = Math.max(candidateSignal.tradeQualityScore || 0, candidate.unifiedDecision.finalExecutionScore || 0);
+        candidateSignal.longConfidence = candidate.unifiedDecision.longScore;
+        candidateSignal.shortConfidence = candidate.unifiedDecision.shortScore;
+        if ((candidateSignal.expectedMovePct || 0) <= 0 && candidate.unifiedDecision.rewardFeeScore > 0) {
+          candidateSignal.expectedMovePct = Math.max(0.35, candidate.unifiedDecision.rewardFeeScore / 100);
+        }
+        console.log(`[FINAL_SIDE_SELECTED_BY_SCORE] ${candidateSym} final router is using unified side=${candidate.unifiedDecision.selectedSide}, setup=${candidate.unifiedDecision.setupType}, leverage=${candidate.unifiedDecision.leverageTier}x.`);
       }
       
       console.log(`[ENTRY_ATTEMPT] symbol=${candidateSym}, side=${candidateSignal.direction}, slotIndex=${botState.openPositions}, notional=${botState.config.maxExposure}`);
@@ -5528,6 +5632,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
       if (riskManager.checkRisk(botState.activeSymbol)) {
         const isBuy = signal.direction === "LONG";
+        const currentUnifiedDecision =
+          ((botState.scannerOpportunities?.find(o => o.symbol === botState.activeSymbol) as any)?.unifiedDecision) ||
+          (((botState as any).unifiedCandidateDecision?.symbol === botState.activeSymbol) ? (botState as any).unifiedCandidateDecision : null);
 
         let baseExposure = botState.config.maxExposure;
         let setupLeverage = botState.config.leverage;
@@ -5545,6 +5652,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
                 sizingReasons.push({ reason, pct: boost });
             }
         };
+
+        if (currentUnifiedDecision && currentUnifiedDecision.shouldEnter) {
+          const unifiedSizeMultiplier = currentUnifiedDecision.sizeMultiplier || 1;
+          if (unifiedSizeMultiplier !== 1) {
+            applySizingModifier(`UNIFIED_${currentUnifiedDecision.sizeTier}_SIZE`, unifiedSizeMultiplier);
+            if (unifiedSizeMultiplier > 1) {
+              console.log(`[HIGH_QUALITY_SETUP_SIZE_BOOST] ${botState.activeSymbol} unified ${currentUnifiedDecision.sizeTier} setup boosted size by ${((unifiedSizeMultiplier - 1) * 100).toFixed(1)}%.`);
+            } else {
+              console.log(`[CONTROLLED_RISK_ENTRY_REDUCED_SIZE] ${botState.activeSymbol} unified ${currentUnifiedDecision.setupType} setup reduced size by ${((1 - unifiedSizeMultiplier) * 100).toFixed(1)}%.`);
+            }
+          }
+        }
 
         if (botState.autoRecoveryMode === "ON") {
           console.log("[AUTO_SOFT_FILTER_RELAXATION_APPLIED] Auto recovery active: applying adaptive risk constraints & 45% size reduction.");
@@ -5588,7 +5707,6 @@ async function handleTradingLogic(isEmergencyMode = false) {
           leverageCmc.trendScore >= 85 &&
           ((leverageCmc.momentumPersistenceScore || 0) >= 70 || Math.abs(leverageCmc.priceChange24h || 0) >= 5) &&
           signal.direction !== "NONE";
-
         let progressiveLeverage = 2; // Preferred default
 
         if (multiPositionMode) {
@@ -5689,8 +5807,10 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log(`[MINIMUM_2X_ENFORCED] ${botState.activeSymbol} leverage target held at ${progressiveLeverage}x by conservative quality/risk policy.`);
         }
 
-        // If our Trend-Matched Directional Execution logic determined a specific quality leverage:
-        if (botState.executionLeverageSelected !== undefined && botState.executionLeverageSelected !== null) {
+        if (currentUnifiedDecision && [1, 2, 4, 8, 10].includes(currentUnifiedDecision.leverageTier)) {
+          progressiveLeverage = currentUnifiedDecision.leverageTier;
+          console.log(`[UNIFIED_LEVERAGE_SELECTED] ${botState.activeSymbol} final router accepted unified leverage ${progressiveLeverage}x (${currentUnifiedDecision.leverageReason}).`);
+        } else if (botState.executionLeverageSelected !== undefined && botState.executionLeverageSelected !== null) {
           progressiveLeverage = botState.executionLeverageSelected;
           console.log(`[LEVERAGE_POLICY_BREAKDOWN] Quality-Adjusted Target leverage set to ${progressiveLeverage}x (Reason: ${botState.executionLeverageReason})`);
         }
@@ -5716,8 +5836,16 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
         if (isHighVol || isHighRisk) {
           applySizingModifier("HIGH_RISK_ASSET", 0.5);
-          setupLeverage = Math.min(botState.config.leverage || 2, setupLeverage); 
-          console.log("[LEVERAGE_DOWNGRADE_TRACE] High risk/vol asset: Capping leverage to config max.");
+          const assetLeverageCap = Math.max(1, assetMeta?.maxLeverage || setupLeverage);
+          const oldLeverage = setupLeverage;
+          setupLeverage = assetLeverageCap < 2
+            ? 1
+            : Math.max(2, Math.min(setupLeverage, assetLeverageCap));
+          if (setupLeverage === 1) {
+            console.log(`[EMERGENCY_1X_ONLY] ${botState.activeSymbol} leverage fell to 1x only because exchange max leverage cap is below 2x.`);
+          } else if (oldLeverage !== setupLeverage) {
+            console.log(`[LEVERAGE_REDUCED_EXTREME_RISK_ONLY] ${botState.activeSymbol} leverage capped from ${oldLeverage}x to ${setupLeverage}x by exchange max leverage ${assetLeverageCap}x.`);
+          }
         }
         
         let customSlMultiplier = 1.0;
@@ -5994,6 +6122,37 @@ async function handleTradingLogic(isEmergencyMode = false) {
         const isExpectedRewardGreaterThanFees = (signal.expectedMovePct || 0) > 0.35;
         const isLiquiditySpreadHealthy = (botState.marketScanner?.spreadQuality || 100) >= 60 && (botState.marketScanner?.liquidityScore || 100) >= 60;
         const isMarginSafe = (accountEquity > 0) && rawAvailableMargin > 0; // verified in downstream simulation block as well
+        const unifiedSetupType = currentUnifiedDecision?.setupType || "NONE";
+        const unifiedFinalScore = currentUnifiedDecision?.finalExecutionScore || 0;
+        const unifiedCmcBias = currentUnifiedDecision?.cmcDirectionalBias || "NEUTRAL";
+        const unifiedHlConfirmation = currentUnifiedDecision?.hlDirectionalConfirmation || "NONE";
+        const apiBudgetThrottleReason = String(botState.apiBudget?.throttleReason || "NONE");
+        const apiBudgetUnavailableForEntry =
+          apiBudgetThrottleReason.includes("ADDRESS_LIMIT") ||
+          apiBudgetThrottleReason.includes("EXCHANGE_429") ||
+          apiBudgetThrottleReason.includes("CUMULATIVE_REQUEST_LIMIT") ||
+          apiBudgetThrottleReason.includes("AUTH_FAILURE");
+        const isStrongEarlyUnifiedAlignment =
+          unifiedSetupType === "EARLY_CONTINUATION" &&
+          unifiedFinalScore >= 60 &&
+          unifiedCmcBias !== "NEUTRAL" &&
+          unifiedCmcBias !== "REVERSAL_WARNING" &&
+          unifiedHlConfirmation !== "CONFLICT";
+        const isProtectedUnifiedSetup =
+          !!currentUnifiedDecision &&
+          currentUnifiedDecision.shouldEnter === true &&
+          currentUnifiedDecision.selectedSide !== "NONE" &&
+          (
+            unifiedSetupType === "CONFIRMED_CONTINUATION" ||
+            unifiedSetupType === "PULLBACK_CONTINUATION" ||
+            isStrongEarlyUnifiedAlignment
+          ) &&
+          unifiedFinalScore >= (unifiedSetupType === "EARLY_CONTINUATION" ? 60 : 55) &&
+          isMarginSafe &&
+          botState.protectionStatus !== "FAILED_EMERGENCY_CLOSE_REQUIRED" &&
+          botState.protectionStatus !== "REPAIRING" &&
+          !apiBudgetUnavailableForEntry &&
+          !(botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil && unifiedFinalScore < 70);
 
         let isApprovedForReduced = isSetupQualityHigh && isConfidenceStrong && isExpectedRewardGreaterThanFees && isLiquiditySpreadHealthy && isMarginSafe;
 
@@ -6008,6 +6167,22 @@ async function handleTradingLogic(isEmergencyMode = false) {
             finalExposure = absoluteExecutableMinimum;
             targetExposure = absoluteExecutableMinimum;
             console.log(`[TOO_SMALL_FALSE_BLOCK_PREVENTED] False block prevented by restoring minimum executable size at routing.`);
+        }
+
+        const executableBuffer = Math.max(0.5, absoluteExecutableMinimum * 0.03);
+        const protectedExecutableMinimum = Math.min(PREFERRED_ENTRY_SIZE, absoluteExecutableMinimum + executableBuffer);
+        const marginCanMeetProtectedMinimum =
+          safeExposure >= protectedExecutableMinimum &&
+          rawAvailableMargin >= (protectedExecutableMinimum / Math.max(1, setupLeverage));
+
+        if (isProtectedUnifiedSetup && marginCanMeetProtectedMinimum && finalExposure < protectedExecutableMinimum) {
+          const oldExposure = finalExposure;
+          finalExposure = Math.min(safeExposure, protectedExecutableMinimum);
+          targetExposure = finalExposure;
+          isApprovedForReduced = true;
+          console.log(`[UNIFIED_CANDIDATE_SIZE_FLOOR_PROTECTED] ${botState.activeSymbol} ${unifiedSetupType} protected from soft-size collapse. Restored $${oldExposure.toFixed(2)} -> $${finalExposure.toFixed(2)}.`);
+          console.log(`[SOFT_SIZE_REDUCTION_CAPPED_AT_EXECUTABLE_MIN] ${botState.activeSymbol} soft reductions capped at executable minimum plus buffer $${protectedExecutableMinimum.toFixed(2)}.`);
+          console.log(`[STRONG_CANDIDATE_TOO_SMALL_FALSE_BLOCK_PREVENTED] ${botState.activeSymbol} unified finalScore=${unifiedFinalScore} remains executable; too-small rejection prevented.`);
         }
 
         if (finalExposure >= PREFERRED_ENTRY_SIZE) {
@@ -6026,9 +6201,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
             }
           } else if (finalExposure >= 10) {
             const isEliteOrHighMomentum = signal.confidence >= 70 || (signal.momentumScore || 0) > 0.6 || (signal.trendStrength || 0) > 0.6;
-            if (isApprovedForReduced && isEliteOrHighMomentum) {
+            if (isApprovedForReduced && (isEliteOrHighMomentum || isProtectedUnifiedSetup)) {
               tier = "MICRO_ENTRY";
-              reducedReason = "Elite/high-momentum setup approved for micro size";
+              reducedReason = isProtectedUnifiedSetup
+                ? "Strong unified candidate protected at executable minimum"
+                : "Elite/high-momentum setup approved for micro size";
               console.log(`[MICRO_ELITE_ENTRY_APPROVED] Micro entry execution approved for setup: $${finalExposure.toFixed(2)} [MICRO_ENTRY]. Reason: ${reducedReason}`);
             } else {
               tier = "NONE";
@@ -6188,10 +6365,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
             console.log(`[SOFT_RISK_SIZE_REDUCTION_APPLIED] Reducing target exposure from $${oldExposure.toFixed(2)} to $${targetExposure.toFixed(2)} due to soft-risk dampeners.`);
           }
           if ((currentOpp as any).leverageModifier !== undefined && (currentOpp as any).leverageModifier < 1.0) {
-            const oldLev = setupLeverage;
-            setupLeverage = Math.max(2, Math.round(setupLeverage * (currentOpp as any).leverageModifier));
-            console.log(`[SOFT_RISK_LEVERAGE_REDUCTION_APPLIED] Reducing leverage from ${oldLev}x to ${setupLeverage}x due to soft-risk dampeners.`);
-            console.log(`[MINIMUM_2X_ENFORCED] Soft risk reduced leverage without dropping below 2x.`);
+            if (currentUnifiedDecision) {
+              const oldExposure = targetExposure;
+              targetExposure *= (currentOpp as any).leverageModifier;
+              targetExposure = Math.max(absoluteExecutableMinimum, targetExposure);
+              console.log(`[SOFT_RISK_REDUCED_SIZE_NOT_LEVERAGE] Preserving unified ${setupLeverage}x leverage for ${botState.activeSymbol}; reduced size from $${oldExposure.toFixed(2)} to $${targetExposure.toFixed(2)} instead.`);
+            } else {
+              const oldLev = setupLeverage;
+              setupLeverage = Math.max(2, Math.round(setupLeverage * (currentOpp as any).leverageModifier));
+              console.log(`[SOFT_RISK_LEVERAGE_REDUCTION_APPLIED] Reducing leverage from ${oldLev}x to ${setupLeverage}x due to soft-risk dampeners.`);
+              console.log(`[MINIMUM_2X_ENFORCED] Soft risk reduced leverage without dropping below 2x.`);
+            }
           }
         }
 
@@ -6208,6 +6392,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log(`[POSITION_SIZE_INVALID_FALSE_BLOCK_PREVENTED] Soft reductions would shrink ${botState.activeSymbol} below preferred executable size. Restored $${oldExposure.toFixed(2)} -> $${targetExposure.toFixed(2)}.`);
           console.log(`[FINAL_ROUTER_SIZE_APPROVED] Final router size preserved above minimum after soft-risk reconciliation.`);
         }
+
+        _targetExposure = targetExposure;
+        _setupLeverage = setupLeverage;
 
         // Calculate Protection Parameters
         let tpPct = botState.config.takeProfitPct || 2.0;

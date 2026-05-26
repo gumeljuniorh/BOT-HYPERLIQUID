@@ -58,32 +58,36 @@ export class CoinMarketCapTrendScanner {
           const data = await response.json();
           if (data && data.data && Array.isArray(data.data)) {
             fetchedAssets = data.data.map((item: any) => {
-              const categories: Array<"TRENDING" | "GAINER" | "VOLUME_MOVER" | "MOST_WATCHED" | "RECENTLY_ADDED"> = [
-                "TRENDING", "GAINER", "VOLUME_MOVER", "MOST_WATCHED", "RECENTLY_ADDED"
-              ];
-              const randCategory = categories[Math.floor(Math.random() * categories.length)];
-              const narratives = ["AI", "meme", "DeFi", "L1", "L2", "gaming", "RWA", "Solana ecosystem", "Base ecosystem"];
-              let tag = narratives[Math.floor(Math.random() * narratives.length)];
               const symUpper = item.symbol.toUpperCase();
+              const usdVal = item.quote ? item.quote.USD : {};
+              const priceChange1h = Number(usdVal.percent_change_1h || 0);
+              const priceChange24h = Number(usdVal.percent_change_24h || 0);
+              const volumeGrowth24h = Number(usdVal.volume_change_24h || 0);
+              let category: "TRENDING" | "GAINER" | "VOLUME_MOVER" | "MOST_WATCHED" | "RECENTLY_ADDED" = "MOST_WATCHED";
+              if (volumeGrowth24h >= 45) category = "VOLUME_MOVER";
+              else if (priceChange24h >= 10) category = "GAINER";
+              else if (Math.abs(priceChange1h) >= 2 || Math.abs(priceChange24h) >= 5) category = "TRENDING";
+
+              let tag = "L1";
               if (["PEPE", "WIF", "BONK", "POPCAT", "DOGE", "SHIB", "FLOKI"].includes(symUpper)) tag = "meme";
               else if (["TAO", "RENDER"].includes(symUpper)) tag = "AI";
               else if (["SOL", "JTO", "PYTH"].includes(symUpper)) tag = "Solana ecosystem";
               else if (["AERO", "DEGEN"].includes(symUpper)) tag = "Base ecosystem";
               else if (["OP", "ARB", "METIS"].includes(symUpper)) tag = "L2";
+              else if (["ONDO"].includes(symUpper)) tag = "RWA";
+              else if (["LDO", "LINK", "HYPE", "UNI", "AAVE"].includes(symUpper)) tag = "DeFi";
               else if (["BTC", "ETH", "SUI", "APT"].includes(symUpper)) tag = "L1";
-
-              const usdVal = item.quote ? item.quote.USD : {};
 
               return {
                 symbol: item.symbol,
                 name: item.name,
-                category: randCategory,
+                category,
                 narrative: tag,
-                volumeGrowth24h: usdVal.volume_change_24h || (Math.random() * 120 - 20),
-                marketCapGrowth24h: usdVal.market_cap_dominance || (Math.random() * 15 - 5),
-                priceChange1h: usdVal.percent_change_1h || (Math.random() * 8 - 4),
-                priceChange24h: usdVal.percent_change_24h || (Math.random() * 25 - 5),
-                priceChange7d: usdVal.percent_change_7d || (Math.random() * 80 - 15),
+                volumeGrowth24h,
+                marketCapGrowth24h: Number(usdVal.market_cap_dominance || 0),
+                priceChange1h,
+                priceChange24h,
+                priceChange7d: Number(usdVal.percent_change_7d || 0),
               };
             });
             logAndEmit(`Fetched ${fetchedAssets.length} assets cleanly from CMC API.`);
