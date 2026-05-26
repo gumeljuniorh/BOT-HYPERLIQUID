@@ -10,6 +10,7 @@ import { calculatePositionSlots, reconcileEntrySloCapacity } from "./services/po
 import { tradeLogger } from "./tradeLogger.js";
 import { snapshotService } from "./services/snapshotService.js";
 import { coinMarketCapTrendScanner } from "./services/coinMarketCapTrendScanner.js";
+import { apiBudgetManager } from "./services/apiBudgetManager.js";
 import fs from "fs";
 import path from "path";
 
@@ -197,7 +198,7 @@ function normalizeEntryBlockReason(reason: string): string {
   if (reason.includes("COOLDOWN") || reason.includes("NO_TRADE") || reason.includes("OVERTRADING") || reason.includes("REVERSE_LOCK")) return "COOLDOWN";
   if (reason.includes("MIN_NOTIONAL") || reason.includes("TOO_SMALL") || reason.includes("POSITION_SIZE")) return "MIN_NOTIONAL";
   if (reason.includes("CONFIDENCE") || reason.includes("LOW_SIGNAL") || reason.includes("NO_TRADE_SIGNAL") || reason.includes("NO_DIRECTIONAL_EDGE")) return "LOW_SIGNAL_SCORE";
-  if (reason.includes("API_RATE") || reason.includes("API_BUDGET") || reason.includes("WSS") || reason.includes("API_NOT")) return "API_BUDGET";
+  if (reason.includes("API_RATE") || reason.includes("API_BUDGET") || reason.includes("ADDRESS_ACTION") || reason.includes("WSS") || reason.includes("API_NOT")) return "API_BUDGET";
   if (reason.includes("VALIDATION") || reason.includes("TP_SL") || reason.includes("ORDER_VALIDATION")) return "EXECUTION_VALIDATION";
   return reason || "UNKNOWN";
 }
@@ -221,6 +222,8 @@ const NONESSENTIAL_EXECUTION_BLOCKERS = [
   "REST_PRESSURE_DEGRADED_MODE",
   "EXECUTION_API_BUDGET_THROTTLED",
   "API_BUDGET_LIMIT",
+  "ADDRESS_ACTION_PACING_ACTIVE",
+  "ADDRESS_ACTION_PACING_REQUIRED",
   "POSITION_SIZE_INVALID_COOLDOWN",
   "ROUTER_BLOCK_COOLDOWN",
   "DEAD_LOW_VOL",
@@ -261,7 +264,7 @@ function isNonessentialExecutionBlocker(reason?: string | null): boolean {
 
 function isHardExecutionBlocker(reason?: string | null): boolean {
   if (!reason) return false;
-  if (reason.includes("API_BUDGET") || reason.includes("REST_PRESSURE") || reason.includes("LOW_CONFIDENCE")) return false;
+  if (reason.includes("API_BUDGET") || reason.includes("REST_PRESSURE") || reason.includes("ADDRESS_ACTION") || reason.includes("LOW_CONFIDENCE")) return false;
   return HARD_EXECUTION_BLOCKERS.some((hardReason) => reason.includes(hardReason));
 }
 
@@ -3231,6 +3234,16 @@ async function handleTradingLogic(isEmergencyMode = false) {
               applySoftExecutionAdjustment(opp, "ROUTER_BLOCK_RETRY_COOLDOWN", 0.7, 0.85);
               return;
           }
+      }
+
+      if (botState.addressActionPacingUntil && Date.now() < botState.addressActionPacingUntil) {
+          const waitSeconds = Math.ceil((botState.addressActionPacingUntil - Date.now()) / 1000);
+          console.log(`[ADDRESS_ACTION_PACING_ACTIVE] ${sym} held for ${waitSeconds}s to respect Hyperliquid one-action-per-address pacing.`);
+          console.log(`[EXECUTION_VALIDATION_DEBOUNCED] ${sym} remains prepared; retry will occur after address pacing clears.`);
+          opp.eligibility = "NEAR_ENTRY";
+          opp.rejectionReason = "ADDRESS_ACTION_PACING_ACTIVE";
+          applySoftExecutionAdjustment(opp, "ADDRESS_ACTION_PACING_ACTIVE", 0.9, 1);
+          return;
       }
 
       // Check Execution API Budget
@@ -6284,8 +6297,30 @@ async function handleTradingLogic(isEmergencyMode = false) {
           return botState.blocker;
         }
 
-        // Apply updated progressive leverage bounds for safety
-        await executionEngine.setLeverage(botState.activeSymbol, setupLeverage);
+        // Apply updated progressive leverage bounds for safety.
+        const leverageUpdated = await executionEngine.setLeverage(botState.activeSymbol, setupLeverage);
+        const addressPacingWaitMs = apiBudgetManager.getAddressActionRetryAfterMs();
+        if (!leverageUpdated && botState.lastApiError?.toLowerCase().includes("address_action_pacing_required")) {
+          const waitMs = Math.max(1000, addressPacingWaitMs || 10000);
+          botState.executionThrottleUntil = Date.now() + waitMs;
+          botState.addressActionPacingUntil = Date.now() + waitMs;
+          botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
+          console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} leverage update was deferred by address action pacing.`);
+          console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} entry deferred before submission; this is retryable, not unrecoverable.`);
+          console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
+          return botState.blocker;
+        }
+
+        if (!config.DRY_RUN && apiBudgetManager.isAddressLimitRecoveryActive() && addressPacingWaitMs > 0) {
+          botState.executionThrottleUntil = Date.now() + addressPacingWaitMs;
+          botState.addressActionPacingUntil = Date.now() + addressPacingWaitMs;
+          botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
+          botState.lastApiError = `ADDRESS_ACTION_PACING_REQUIRED: leverage update consumed address action slot`;
+          console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} leverage update succeeded; waiting before entry to respect one exchange action per 10s.`);
+          console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} entry deferred before order submit so it is not misclassified as exchange rejection.`);
+          console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(addressPacingWaitMs / 1000)}s.`);
+          return botState.blocker;
+        }
 
         // REAL_ENTRY_REQUIRED: Submitting highly executable aggressive Limit order (1.0% buffer through the best bid/ask)
         console.log(`[REAL_ENTRY_REQUIRED] Approved setup detects entry signal. Prioritizing immediate marketable execution over passive waiting style.`);
@@ -6329,6 +6364,14 @@ async function handleTradingLogic(isEmergencyMode = false) {
                     botState.blocker = "ENTRY_SLO_HARD_CAPACITY_BLOCK";
                     console.log(`[ENTRY_BLOCKED] symbol=${botState.activeSymbol}, reason=MAX_OPEN_POSITIONS, raw=ENTRY_SLO_HARD_CAPACITY_BLOCK`);
                 }
+            } else if (err.includes("address_action_pacing_required") || err.includes("address_limit_one_action_per_10s") || err.includes("one_action_per_10s")) {
+                const waitMs = Math.max(1000, apiBudgetManager.getAddressActionRetryAfterMs() || 10000);
+                botState.executionThrottleUntil = Date.now() + waitMs;
+                botState.addressActionPacingUntil = Date.now() + waitMs;
+                botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
+                console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} order failure is address action pacing, not exchange rejection.`);
+                console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} deferred without self-repair retry to avoid spending the next action slot.`);
+                console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
             } else if (
               err.includes("rate limit") || 
               err.includes("rate_limit") || 
@@ -6572,7 +6615,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           }
           console.log(`ORDER_SUBMITTED_SUCCESSFULLY: ${botState.activeSymbol} filled at ${fillPrice}.`);
         } else {
-          if (botState.blocker === "API_RATE_LIMIT_EXCEEDED" || (botState.lastApiError && (botState.lastApiError.includes("cumulative volume") || botState.lastApiError.includes("cumulative request")))) {
+          if (botState.blocker === "API_RATE_LIMIT_EXCEEDED" || botState.blocker === "ADDRESS_ACTION_PACING_ACTIVE" || (botState.lastApiError && (botState.lastApiError.includes("cumulative volume") || botState.lastApiError.includes("cumulative request") || botState.lastApiError.includes("ADDRESS_ACTION_PACING_REQUIRED")))) {
               console.warn("BOT: Entry order deferred due to Hyperliquid API Budget constraints. No protection active.");
           } else {
               console.error("BOT: Entry order failed. No protection active.");
@@ -6592,7 +6635,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
             "INSUFFICIENT_MARGIN_RECOVERY_FAILED",
             "INSUFFICIENT_MARGIN_NOT_RECOVERABLE",
             "INVALID_ORDER_SIZE_RECOVERY_FAILED",
-            "INVALID_PRICE_RECOVERY_FAILED"
+            "INVALID_PRICE_RECOVERY_FAILED",
+            "ADDRESS_ACTION_PACING_ACTIVE"
           ];
           
           let effectiveBlocker = botState.blocker || "";
@@ -7957,6 +8001,16 @@ async function loop() {
     if (!botState.orderSubmittedFailedUntil || loopNow > botState.orderSubmittedFailedUntil) {
       console.log("[BLOCKER_RECOVERY] ORDER_SUBMITTED_FAILED temporary pacing state expired. Resetting blocker to permit clean entry re-evaluations.");
       botState.blocker = null;
+    }
+  }
+
+  if (botState.blocker === "ADDRESS_ACTION_PACING_ACTIVE" && (!botState.addressActionPacingUntil || loopNow > botState.addressActionPacingUntil)) {
+    console.log("[ADDRESS_ACTION_PACING_CLEARED] Hyperliquid address pacing window cleared; execution routing may resume.");
+    botState.blocker = null;
+    botState.executionThrottleUntil = 0;
+    botState.addressActionPacingUntil = 0;
+    if (botState.lastApiError?.includes("ADDRESS_ACTION_PACING_REQUIRED")) {
+      botState.lastApiError = null;
     }
   }
   

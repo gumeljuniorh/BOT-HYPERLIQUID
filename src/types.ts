@@ -106,6 +106,7 @@ export interface BotState {
   apiConnected: boolean;
   wssConnected: boolean;
   apiRateLimitUntil?: number;
+  addressActionPacingUntil?: number;
   orderSubmittedFailedUntil?: number;
   apiBudget?: any;
   routerBlockCooldowns?: Record<string, number>;

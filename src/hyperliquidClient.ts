@@ -164,7 +164,14 @@ export class HyperliquidClient {
     if (!budget.allowed) {
       console.warn(`[EXECUTION_BUDGET_EXCEEDED] Exchange request suppressed. lane=${lane}, action=${action?.type || "unknown"}, reason=${budget.reason}`);
       if (lane === "execution") botState.blocker = "EXECUTION_LAYER_THROTTLED";
-      return { status: "error", response: budget.reason };
+      return {
+        status: "error",
+        response: budget.reason,
+        internalBudgetBlock: true,
+        retryAfterMs: budget.retryAfterMs,
+        lane,
+        action: action?.type || "unknown"
+      };
     }
 
     for (let i = 0; i < retries; i++) {
@@ -218,6 +225,12 @@ export class HyperliquidClient {
           
           if (parsed && parsed.status === "err") {
              const strResp = JSON.stringify(parsed);
+             if (strResp.toLowerCase().includes("address") && strResp.toLowerCase().includes("10s")) {
+                 console.warn(`[ADDRESS_LIMIT_RECOVERY_ACTIVE] Hyperliquid address pacing response detected.`);
+                 apiBudgetManager.enableAddressLimitRecovery();
+                 botState.apiBudget = apiBudgetManager.getSnapshot();
+                 return parsed;
+             }
              if (strResp.includes("Too many cumulative requests sent")) {
                  console.error(`[API_RATE_LIMIT_GLOBAL] Hyperliquid cumulative request rate limit hit!`);
                  apiBudgetManager.markExchangeRateLimit("CUMULATIVE_REQUEST_LIMIT", config.API_HARD_BACKOFF_MS);

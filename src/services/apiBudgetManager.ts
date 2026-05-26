@@ -88,9 +88,13 @@ export class ApiBudgetManager {
     
     if (this.addressLimitRecoveryActive && type === "exchange") {
         if (now - this.lastAddressActionTime < 10000) {
-            this.blockedRequests++;
-            console.warn(`[ADDRESS_LIMIT_ONE_ACTION_PER_10S] Blocked action for ${lane}, must wait 10s between actions.`);
-            return this.decision(false, lane, "ADDRESS_LIMIT_ONE_ACTION_PER_10S", 10000 - (now - this.lastAddressActionTime));
+            if (isCritical) {
+                console.warn(`[ADDRESS_LIMIT_CRITICAL_PROTECTION_ALLOWED] Allowing critical ${lane} exchange action despite address pacing window.`);
+            } else {
+                this.blockedRequests++;
+                console.warn(`[ADDRESS_LIMIT_ONE_ACTION_PER_10S] Blocked action for ${lane}, must wait 10s between actions.`);
+                return this.decision(false, lane, "ADDRESS_LIMIT_ONE_ACTION_PER_10S", 10000 - (now - this.lastAddressActionTime));
+            }
         }
     }
 
@@ -190,6 +194,15 @@ export class ApiBudgetManager {
           this.addressLimitRecoveryActive = true;
           console.warn(`[ADDRESS_LIMIT_RECOVERY_ACTIVE] Entering strict 1 exchange action per 10s mode.`);
       }
+  }
+
+  isAddressLimitRecoveryActive(): boolean {
+      return this.addressLimitRecoveryActive;
+  }
+
+  getAddressActionRetryAfterMs(): number {
+      if (!this.addressLimitRecoveryActive) return 0;
+      return Math.max(0, 10000 - (Date.now() - this.lastAddressActionTime));
   }
 
   noteCacheHit(lane: ApiBudgetLane, endpoint: string) {

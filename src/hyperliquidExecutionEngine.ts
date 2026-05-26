@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { hClient } from "./hyperliquidClient.js";
 import { calculatePositionSlots, canOpenNewEntry, reconcileEntrySloCapacity } from "./services/positionSlotCalculator.js";
 import { executionValidationGuard } from "./services/executionValidationGuard.js";
+import { apiBudgetManager } from "./services/apiBudgetManager.js";
 
 export function formatHyperliquidPrice(px: number): string {
   if (px <= 0 || isNaN(px) || !isFinite(px)) return "0";
@@ -22,6 +23,7 @@ export function formatHyperliquidPrice(px: number): string {
 export function classifyExchangeRejection(error: string): string {
   const normalized = (error || "").toLowerCase();
   if (normalized.includes("entry_blocked_no_available_slo") || normalized.includes("entry_blocked_no_available_slot")) return "INTERNAL_ENTRY_SLO_CAPACITY";
+  if (normalized.includes("address_limit_one_action_per_10s") || normalized.includes("one_action_per_10s") || (normalized.includes("address") && normalized.includes("10s"))) return "ADDRESS_ACTION_PACING_REQUIRED";
   if (normalized.includes("auth") || normalized.includes("signer") || normalized.includes("private key") || normalized.includes("signature")) return "AUTH_FAILURE";
   if (normalized.includes("api_budget") || normalized.includes("rest_pressure") || normalized.includes("execution_layer_throttled")) return "API_BUDGET_LIMIT";
   if (normalized.includes("rate limit") || normalized.includes("too many cumulative") || normalized.includes("exceeded") || normalized.includes("volume traded")) return "API_RATE_LIMIT";
@@ -35,6 +37,19 @@ export function classifyExchangeRejection(error: string): string {
 }
 
 export class HyperliquidExecutionEngine {
+  private leverageCache = new Map<string, { leverage: number; timestamp: number }>();
+
+  private applyAddressActionPacing(symbol: string, raw: string, retryAfterMs?: number) {
+    const waitMs = Math.max(1000, retryAfterMs || apiBudgetManager.getAddressActionRetryAfterMs() || 10000);
+    botState.lastApiError = `ADDRESS_ACTION_PACING_REQUIRED: ${raw}`;
+    botState.executionThrottleUntil = Date.now() + waitMs;
+    botState.addressActionPacingUntil = Date.now() + waitMs;
+    botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
+    console.warn(`[ADDRESS_ACTION_PACING_DETECTED] symbol=${symbol}, retryAfterMs=${waitMs}, raw=${raw}`);
+    console.warn(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${symbol} order deferred instead of marked unrecoverable.`);
+    console.warn(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${symbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
+  }
+
   async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean, isIoc: boolean = false) {
     const validation = executionValidationGuard.validateOrderIntent({ symbol, isBuy, size: sz, price: px, reduceOnly });
     if (!validation.allowed) {
@@ -168,6 +183,11 @@ export class HyperliquidExecutionEngine {
             return result;
           } else if (status.error) {
             const classification = classifyExchangeRejection(status.error);
+            if (classification === "ADDRESS_ACTION_PACING_REQUIRED") {
+              console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${status.error}`);
+              this.applyAddressActionPacing(symbol, status.error);
+              return null;
+            }
             if (classification === "API_RATE_LIMIT") { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error(`Order returned API error: ${status.error}`); }
             console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${status.error}`);
             botState.lastApiError = `${classification}: ${status.error}`;
@@ -193,6 +213,11 @@ export class HyperliquidExecutionEngine {
           errorDetail = "Circular or too complex response object";
         }
         const classification = classifyExchangeRejection(errorDetail);
+        if (classification === "ADDRESS_ACTION_PACING_REQUIRED") {
+          console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${errorDetail}`);
+          this.applyAddressActionPacing(symbol, errorDetail, (result as any)?.retryAfterMs);
+          return null;
+        }
         if (classification === "API_RATE_LIMIT") { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error("Order failed:", errorDetail); }
         console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${errorDetail}`);
         botState.lastApiError = `${classification}: ${errorDetail}`;
@@ -457,6 +482,12 @@ export class HyperliquidExecutionEngine {
       } else {
          const errDetail = JSON.stringify(result || {});
          console.error(`[EXECUTOR] Failed to place TP/SL orders: `, errDetail);
+         const classification = classifyExchangeRejection(errDetail);
+         if (classification === "ADDRESS_ACTION_PACING_REQUIRED") {
+             this.applyAddressActionPacing(symbol, errDetail, (result as any)?.retryAfterMs);
+             console.warn(`[PROTECTION_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${symbol} TP/SL placement deferred by address pacing and must be retried.`);
+             return false;
+         }
          if (errDetail.includes("Too many cumulative requests sent") || (result && result.response && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent"))) {
              botState.apiRateLimitUntil = Date.now() + 300000;
              botState.blocker = "API_RATE_LIMIT_EXCEEDED";
@@ -472,6 +503,12 @@ export class HyperliquidExecutionEngine {
 
   async setLeverage(symbol: string, leverage: number) {
     if (config.DRY_RUN) return true;
+    const cached = this.leverageCache.get(symbol);
+    if (cached && cached.leverage === leverage && Date.now() - cached.timestamp < 10 * 60 * 1000) {
+      console.log(`[LEVERAGE_UPDATE_SKIPPED_CACHED] ${symbol} leverage ${leverage}x was recently confirmed; preserving exchange action budget.`);
+      return true;
+    }
+
     const action = {
       type: "updateLeverage",
       asset: getAssetId(symbol),
@@ -480,7 +517,20 @@ export class HyperliquidExecutionEngine {
     };
     try {
       const result = await hClient.exchangeRequest(action);
-      return result && result.status === "ok";
+      if (result && result.status === "ok") {
+        this.leverageCache.set(symbol, { leverage, timestamp: Date.now() });
+        return true;
+      }
+
+      const errorDetail = result ? JSON.stringify(result).slice(0, 200) : "Empty response";
+      const classification = classifyExchangeRejection(errorDetail);
+      console.warn(`[LEVERAGE_UPDATE_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${errorDetail}`);
+      if (classification === "ADDRESS_ACTION_PACING_REQUIRED") {
+        this.applyAddressActionPacing(symbol, errorDetail, (result as any)?.retryAfterMs);
+      } else {
+        botState.lastApiError = `${classification}: ${errorDetail}`;
+      }
+      return false;
     } catch (e) {
       console.error("Failed to set leverage:", e);
       return false;
