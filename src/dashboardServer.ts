@@ -64,9 +64,11 @@ async function startServer() {
     const { dryRun } = req.body;
     if (typeof dryRun === "boolean") {
       config.DRY_RUN = dryRun;
+      config.LIVE_TRADING = !dryRun;
       botState.dryRun = dryRun;
     } else {
       config.DRY_RUN = !config.DRY_RUN;
+      config.LIVE_TRADING = !config.DRY_RUN;
       botState.dryRun = config.DRY_RUN;
     }
 

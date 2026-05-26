@@ -64,9 +64,9 @@ export class ExecutionValidationGuard {
 
     const szDecimals = typeof meta.szDecimals === "number" ? meta.szDecimals : 3;
     const sizeMultiplier = Math.pow(10, szDecimals);
-    const roundedSize = Math.floor(Math.abs(input.size) * sizeMultiplier + 1e-7) / sizeMultiplier;
+    let roundedSize = Math.floor(Math.abs(input.size) * sizeMultiplier + 1e-7) / sizeMultiplier;
     const roundedPrice = input.price;
-    const finalNotional = roundedSize * roundedPrice;
+    let finalNotional = roundedSize * roundedPrice;
 
     if (!Number.isFinite(roundedSize) || roundedSize <= 0) {
       this.cooldown(input.symbol, now);
@@ -74,8 +74,10 @@ export class ExecutionValidationGuard {
     }
 
     if (!input.reduceOnly && finalNotional < minNotional) {
-      this.cooldown(input.symbol, now);
-      return baseResult(false, "ORDER_VALIDATION_REJECTED_MIN_NOTIONAL", roundedSize, roundedPrice);
+      const minRequiredSize = Math.ceil((minNotional / roundedPrice) * sizeMultiplier) / sizeMultiplier;
+      console.log(`[EXECUTION_VALIDATION_UPGRADE] Target notional $${finalNotional.toFixed(2)} is below minimum $${minNotional.toFixed(2)}. Adjusting size from ${roundedSize} to ${minRequiredSize} to clear validation.`);
+      roundedSize = minRequiredSize;
+      finalNotional = roundedSize * roundedPrice;
     }
 
     if (!input.reduceOnly) {

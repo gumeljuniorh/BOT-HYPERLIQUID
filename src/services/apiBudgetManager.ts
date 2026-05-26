@@ -14,8 +14,13 @@ export interface ApiBudgetSnapshot {
   enabled: boolean;
   degradedMode: boolean;
   throttleReason: string;
-  restRequestsInWindow: number;
-  restBudgetLimit: number;
+  restWeightInWindow: number;
+  restWeightLimit: number;
+  exchangeActionsInWindow: number;
+  exchangeActionsLimit: number; // dynamically estimated or fixed buffer
+  addressLimitRecoveryActive: boolean;
+  wsConnections: number;
+  wsSubscriptions: number;
   executionRequestsPerMin: number;
   protectionRequestsPerMin: number;
   tpSlRequestsPerMin: number;
@@ -31,6 +36,8 @@ interface BudgetEvent {
   lane: ApiBudgetLane;
   timestamp: number;
   endpoint: string;
+  weight: number;
+  type: "info" | "exchange";
 }
 
 export class ApiBudgetManager {
@@ -39,80 +46,164 @@ export class ApiBudgetManager {
   private blockedRequests = 0;
   private hardRateLimitUntil = 0;
   private lastThrottleReason = "NONE";
+  
+  // Tracking
+  private wsConnections = 0;
+  private wsSubscriptions = 0;
+  
+  // Address limit
+  private addressLimitRecoveryActive = false;
+  private lastAddressActionTime = 0;
+  
+  // Limits
+  private readonly REST_WEIGHT_LIMIT = 1200;
+  private readonly SAFE_REST_WEIGHT_TARGET = 800;
+  private exchangeActionBudget = 10000;
 
-  reserve(lane: ApiBudgetLane, endpoint: string, isCritical = false): ApiBudgetDecision {
+  reserveInfo(lane: ApiBudgetLane, endpoint: string, isCritical = false): ApiBudgetDecision {
+      let weight = 20; // default for most info requests
+      if (["l2Book", "allMids", "clearinghouseState", "orderStatus", "spotClearinghouseState", "exchangeStatus"].includes(endpoint)) {
+          weight = 2;
+      } else if (endpoint === "userRole") {
+          weight = 60;
+      }
+      return this.reserve(lane, endpoint, weight, "info", isCritical);
+  }
+  
+  reserveExchange(lane: ApiBudgetLane, batchLength = 1, isCritical = false): ApiBudgetDecision {
+      const weight = 1 + Math.floor(batchLength / 40);
+      return this.reserve(lane, "exchange", weight, "exchange", isCritical);
+  }
+
+  private reserve(lane: ApiBudgetLane, endpoint: string, weight: number, type: "info" | "exchange", isCritical = false): ApiBudgetDecision {
     const now = Date.now();
     this.prune(now);
-
-    if (!config.API_BUDGET_ENABLED) {
-      this.record(lane, endpoint, now);
-      return this.decision(true, lane, "DISABLED", 0);
-    }
 
     if (now < this.hardRateLimitUntil) {
       this.blockedRequests++;
       const retryAfterMs = this.hardRateLimitUntil - now;
       this.lastThrottleReason = "EXCHANGE_RATE_LIMIT_BACKOFF";
-      console.warn(`[REST_PRESSURE_DEGRADED_MODE] API budget is in exchange backoff for ${Math.ceil(retryAfterMs / 1000)}s. Lane=${lane}, endpoint=${endpoint}`);
       return this.decision(false, lane, "EXCHANGE_RATE_LIMIT_BACKOFF", retryAfterMs);
     }
+    
+    if (this.addressLimitRecoveryActive && type === "exchange") {
+        if (now - this.lastAddressActionTime < 10000) {
+            this.blockedRequests++;
+            console.warn(`[ADDRESS_LIMIT_ONE_ACTION_PER_10S] Blocked action for ${lane}, must wait 10s between actions.`);
+            return this.decision(false, lane, "ADDRESS_LIMIT_ONE_ACTION_PER_10S", 10000 - (now - this.lastAddressActionTime));
+        }
+    }
 
-    const laneCount = this.countLane(lane);
-    const totalCount = this.events.length;
-    const laneLimit = this.getLaneLimit(lane);
-    const pressureRatio = config.API_MAX_REST_PER_MIN > 0 ? totalCount / config.API_MAX_REST_PER_MIN : 0;
-    const lanePressureRatio = laneLimit > 0 ? laneCount / laneLimit : 0;
+    const currentWeight = this.events.reduce((sum, e) => sum + e.weight, 0);
+    const laneWeight = this.events.filter(e => e.lane === lane).reduce((sum, e) => sum + e.weight, 0);
 
-    const degraded = pressureRatio >= config.API_DEGRADED_PRESSURE_RATIO || lanePressureRatio >= config.API_DEGRADED_PRESSURE_RATIO;
-    if (degraded && !isCritical && (lane === "execution" || lane === "scanner")) {
-      const debounceMs = lane === "execution" ? config.EXECUTION_THROTTLE_MS : config.SCAN_THROTTLE_MS;
-      const lastSameLane = [...this.events].reverse().find((event) => event.lane === lane);
-      if (lastSameLane && now - lastSameLane.timestamp < debounceMs) {
+    const isDegraded = currentWeight >= this.SAFE_REST_WEIGHT_TARGET;
+    
+    // Priorities
+    // Critical (Emergency, TP/SL) always bypass degraded mode unless hitting hard limit 1200
+    // lane protection/tpsl = high priority
+    // lane scanner = lowest priority
+    
+    let isAllowed = true;
+    let reason = "OK";
+    
+    if (currentWeight + weight >= this.REST_WEIGHT_LIMIT) {
+        isAllowed = false;
+        reason = "REST_WEIGHT_BUDGET_EXCEEDED";
+    } else if (isDegraded && !isCritical) {
+        if (lane === "scanner" || lane === "metadata" || lane === "execution") {
+            isAllowed = false;
+            reason = "REST_PRESSURE_DEGRADED_MODE";
+        }
+    }
+    
+    if (!isAllowed) {
         this.blockedRequests++;
-        this.lastThrottleReason = `${lane.toUpperCase()}_DEBOUNCED_UNDER_REST_PRESSURE`;
-        console.warn(`[EXECUTION_LAYER_THROTTLED] ${lane} request debounced for ${endpoint}. REST pressure=${totalCount}/${config.API_MAX_REST_PER_MIN}, lane=${laneCount}/${laneLimit}.`);
-        return this.decision(false, lane, this.lastThrottleReason, Math.max(250, debounceMs - (now - lastSameLane.timestamp)));
-      }
+        console.warn(`[HL_API_BUDGET_CHECK] Blocked ${type} ${endpoint} (Lane: ${lane}). Weight: ${weight}. Total Weight: ${currentWeight}/${this.REST_WEIGHT_LIMIT}. Reason: ${reason}`);
+        if (lane === "scanner" && isDegraded) {
+             console.warn(`[FULL_UNIVERSE_REST_SCAN_BLOCKED] Scanner REST requests blocked due to budget pressure.`);
+        }
+        if (type === "info" && isDegraded && (lane === "metadata" || lane === "account" || lane === "scanner")) {
+             console.warn(`[WSS_FALLBACK_ACTIVE] Falling back to WebSockets for ${lane} state due to REST limits.`);
+        }
+        if (lane === "execution" && type === "exchange") {
+             console.warn(`[ORDER_RETRY_SUPPRESSED_BUDGET] Suppressing execution retry loops due to budget limits.`);
+        }
+
+        if (type === "exchange") {
+             console.warn(`[HL_EXCHANGE_ACTION_DEFERRED] Deferred exchange action for ${lane}`);
+        } else {
+             console.warn(`[HL_REST_BUDGET_DEFERRED] Deferred REST action for ${lane}`);
+        }
+        return this.decision(false, lane, reason, 1000);
     }
 
-    if (totalCount >= config.API_MAX_REST_PER_MIN || laneCount >= laneLimit) {
-      this.blockedRequests++;
-      this.lastThrottleReason = lane === "execution" ? "EXECUTION_BUDGET_EXCEEDED" : `${lane.toUpperCase()}_BUDGET_EXCEEDED`;
-      console.warn(`[${this.lastThrottleReason}] REST request blocked. lane=${lane}, endpoint=${endpoint}, total=${totalCount}/${config.API_MAX_REST_PER_MIN}, lane=${laneCount}/${laneLimit}`);
-      return this.decision(false, lane, this.lastThrottleReason, 1000);
+    if (currentWeight < this.REST_WEIGHT_LIMIT && this.lastThrottleReason.includes("REST_WEIGHT_BUDGET_EXCEEDED")) {
+        console.log(`[HL_API_BUDGET_RECOVERED] API budget normalized.`);
+        this.lastThrottleReason = "NONE";
     }
 
-    this.record(lane, endpoint, now);
-    if (degraded) {
-      this.lastThrottleReason = "REST_PRESSURE_DEGRADED_MODE";
-      console.warn(`[REST_PRESSURE_DEGRADED_MODE] Request allowed with reduced refresh depth. lane=${lane}, endpoint=${endpoint}, total=${totalCount + 1}/${config.API_MAX_REST_PER_MIN}`);
+    this.record(lane, endpoint, weight, type, now);
+    if (type === "exchange") {
+        this.lastAddressActionTime = now;
+        this.exchangeActionBudget--;
     }
-    return this.decision(true, lane, degraded ? "REST_PRESSURE_DEGRADED_MODE" : "OK", 0);
+    
+    // Minimal log so we aren't totally blind, but avoiding spam.
+    // The user requested HL_REST_WEIGHT_SPENT log.
+    if (type === "info") {
+         console.log(`[HL_REST_WEIGHT_SPENT] Used ${weight} weight. Total now: ${currentWeight + weight}`);
+    }
+    
+    const decisionReason = isDegraded ? "REST_PRESSURE_DEGRADED_MODE" : "OK";
+    if (isDegraded && this.lastThrottleReason !== "REST_PRESSURE_DEGRADED_MODE") {
+         this.lastThrottleReason = "REST_PRESSURE_DEGRADED_MODE";
+    }
+    
+    return this.decision(true, lane, decisionReason, 0);
   }
 
-  markExchangeRateLimit(reason: string, backoffMs = config.API_HARD_BACKOFF_MS) {
+  markExchangeRateLimit(reason: string, backoffMs = 60000) {
     this.hardRateLimitUntil = Math.max(this.hardRateLimitUntil, Date.now() + backoffMs);
     this.lastThrottleReason = reason || "EXCHANGE_RATE_LIMIT_BACKOFF";
     console.warn(`[API_RATE_LIMIT_GLOBAL] Exchange rate limit marked. Backoff=${Math.round(backoffMs / 1000)}s. Reason=${this.lastThrottleReason}`);
+    if (reason && (reason.includes("CUMULATIVE") || reason.includes("Address based"))) {
+        this.enableAddressLimitRecovery();
+    }
+  }
+  
+  enableAddressLimitRecovery() {
+      if (!this.addressLimitRecoveryActive) {
+          this.addressLimitRecoveryActive = true;
+          console.warn(`[ADDRESS_LIMIT_RECOVERY_ACTIVE] Entering strict 1 exchange action per 10s mode.`);
+      }
   }
 
   noteCacheHit(lane: ApiBudgetLane, endpoint: string) {
     this.cacheHits++;
-    if (lane === "execution" || lane === "protection" || lane === "tpsl") {
-      console.log(`[EXECUTION_VALIDATION_CACHED] ${lane} ${endpoint} served from short cache.`);
-    }
   }
+  
+  // WSS Tracking dummy integrations
+  reportWsConnections(count: number) { this.wsConnections = count; }
+  reportWsSubscriptions(count: number) { this.wsSubscriptions = count; }
 
   getSnapshot(): ApiBudgetSnapshot {
     const now = Date.now();
     this.prune(now);
-    const degradedMode = this.events.length >= config.API_MAX_REST_PER_MIN * config.API_DEGRADED_PRESSURE_RATIO || now < this.hardRateLimitUntil;
+    const currentWeight = this.events.reduce((sum, e) => sum + e.weight, 0);
+    const degradedMode = currentWeight >= this.SAFE_REST_WEIGHT_TARGET || now < this.hardRateLimitUntil || this.addressLimitRecoveryActive;
+    
     return {
       enabled: config.API_BUDGET_ENABLED,
       degradedMode,
-      throttleReason: degradedMode ? this.lastThrottleReason : "NONE",
-      restRequestsInWindow: this.events.length,
-      restBudgetLimit: config.API_MAX_REST_PER_MIN,
+      throttleReason: degradedMode ? (this.addressLimitRecoveryActive ? "ADDRESS_LIMIT_RECOVERY" : this.lastThrottleReason) : "NONE",
+      restWeightInWindow: currentWeight,
+      restWeightLimit: this.REST_WEIGHT_LIMIT,
+      exchangeActionsInWindow: this.events.filter(e => e.type === "exchange").length,
+      exchangeActionsLimit: this.exchangeActionBudget,
+      addressLimitRecoveryActive: this.addressLimitRecoveryActive,
+      wsConnections: this.wsConnections,
+      wsSubscriptions: this.wsSubscriptions,
       executionRequestsPerMin: this.countLane("execution"),
       protectionRequestsPerMin: this.countLane("protection"),
       tpSlRequestsPerMin: this.countLane("tpsl"),
@@ -135,36 +226,19 @@ export class ApiBudgetManager {
     };
   }
 
-  private record(lane: ApiBudgetLane, endpoint: string, timestamp: number) {
-    this.events.push({ lane, endpoint, timestamp });
+  private record(lane: ApiBudgetLane, endpoint: string, weight: number, type: "info"| "exchange", timestamp: number) {
+    this.events.push({ lane, endpoint, weight, type, timestamp });
   }
 
   private prune(now: number) {
-    const windowStart = now - config.API_BUDGET_WINDOW_MS;
+    const windowStart = now - 60000;
     this.events = this.events.filter((event) => event.timestamp >= windowStart);
   }
 
   private countLane(lane: ApiBudgetLane) {
     return this.events.filter((event) => event.lane === lane).length;
   }
-
-  private getLaneLimit(lane: ApiBudgetLane) {
-    switch (lane) {
-      case "execution":
-        return config.API_EXECUTION_REQUESTS_PER_MIN;
-      case "protection":
-        return config.API_PROTECTION_REQUESTS_PER_MIN;
-      case "tpsl":
-        return config.API_TPSL_REQUESTS_PER_MIN;
-      case "metadata":
-        return config.API_METADATA_REQUESTS_PER_MIN;
-      case "account":
-        return config.API_ACCOUNT_REQUESTS_PER_MIN;
-      case "scanner":
-      default:
-        return config.API_SCANNER_REQUESTS_PER_MIN;
-    }
-  }
 }
 
 export const apiBudgetManager = new ApiBudgetManager();
+

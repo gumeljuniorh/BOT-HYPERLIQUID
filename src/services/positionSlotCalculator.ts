@@ -21,16 +21,14 @@ function countPendingEntrySymbols(openSymbols: Set<string>): number {
   const now = Date.now();
 
   for (const order of botState.activeOrders || []) {
+    // Only count non-reduceOnly limit entries that are actually open
+    // Wait, the user asked to ONLY count real open positions?
+    // Let's only look at orders placed in the last 15 seconds to avoid artificially holding slots
     if (order && !order.reduceOnly && order.coin && !openSymbols.has(order.coin)) {
-      pendingSymbols.add(order.coin);
+      if (order.timestamp && now - order.timestamp < 15000) {
+        pendingSymbols.add(order.coin);
+      }
     }
-  }
-
-  const contexts = botState.entryOrdersContext || {};
-  for (const ctx of Object.values(contexts)) {
-    if (!ctx?.symbol || openSymbols.has(ctx.symbol)) continue;
-    const ageMs = now - (ctx.ts || now);
-    if (ageMs <= 30_000) pendingSymbols.add(ctx.symbol);
   }
 
   return pendingSymbols.size;
@@ -47,6 +45,14 @@ function logPositionSlotState(openPositions: number, pendingEntries: number, con
 }
 
 export function calculatePositionSlots(): void {
+  const now = Date.now();
+  if (botState.blocker === "ORDER_SUBMITTED_FAILED") {
+    if (!botState.orderSubmittedFailedUntil || now > botState.orderSubmittedFailedUntil) {
+      console.log("[SLOT_CALCULATOR_RECOVERY] ORDER_SUBMITTED_FAILED temporary pacing state expired. Resetting blocker.");
+      botState.blocker = null;
+    }
+  }
+
   const configuredMax = botState.config?.maxOpenPositions ?? 3;
   const openSymbols = getOpenPositionSymbols();
   const openCount = Math.max(openSymbols.size, botState.openPositions || 0);
@@ -101,8 +107,7 @@ export function calculatePositionSlots(): void {
     "CRITICAL_FAILURE",
     "API_NOT_VERIFIED",
     "CORRUPTED_POSITION_STATE",
-    "CATASTROPHIC_LIQUIDITY",
-    "ORDER_SUBMITTED_FAILED"
+    "CATASTROPHIC_LIQUIDITY"
   ];
   
   const blocker = botState.blocker || "";
@@ -121,6 +126,23 @@ export function calculatePositionSlots(): void {
   botState.slotReductionReason = reason;
   botState.slotReductionIsHardSafety = isHardSafety;
   logPositionSlotState(openCount, pendingEntries, configuredMax, effectiveMax, botState.availableSlots, reason);
+
+  if (isHardSafety && effectiveMax < configuredMax) {
+      const modeLog2 = `[POSITION_SLOT_REDUCED_HARD_SAFETY_ONLY] Slots reduced from ${configuredMax} to ${effectiveMax} due to hard blocker: ${reason}`;
+      if (modeLog2 !== lastSlotLog) {
+         console.log(modeLog2);
+         lastSlotLog = modeLog2; // prevent spam
+      }
+  }
+
+  // Requirement: THREE_POSITION_MODE_ACTIVE
+  if (configuredMax >= 3 && botState.availableSlots > 0 && reason === "NONE") {
+      const modeLog = `[THREE_POSITION_MODE_ACTIVE] Multi-position trading allowed. Active positions: ${openCount}, Pending: ${pendingEntries}, Remaining Available: ${botState.availableSlots}`;
+      if (modeLog !== lastSlotLog) {
+         console.log(modeLog);
+         lastSlotLog = modeLog;
+      }
+  }
 }
 
 export function canOpenNewEntry(symbol?: string): boolean {
@@ -128,6 +150,11 @@ export function canOpenNewEntry(symbol?: string): boolean {
   const allowed = (botState.availableSlots || 0) > 0;
   if (!allowed) {
     console.log(`[ENTRY_BLOCKED] symbol=${symbol || botState.activeSymbol || "UNKNOWN"}, reason=MAX_OPEN_POSITIONS, openPositions=${botState.usedPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || 3}, availableSlots=${botState.availableSlots || 0}, slotReductionReason=${botState.slotReductionReason || "NONE"}`);
+  } else {
+    // Only log occasionally or when checking a specific symbol to avoid spam
+    if (symbol) {
+        console.log(`[POSITION_SLOT_AVAILABLE] symbol=${symbol}, openPositions=${botState.usedPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || 3}, availableSlots=${botState.availableSlots || 0}`);
+    }
   }
   return allowed;
 }

@@ -19,7 +19,9 @@ export const config = {
   HYPERLIQUID_API_WALLET: process.env.HYPERLIQUID_API_WALLET || "0xdaae5d2bffa4b090db68950c1d5f3245cb786711",
   HYPERLIQUID_API_URL: process.env.HYPERLIQUID_API_URL && process.env.HYPERLIQUID_API_URL.startsWith('http') ? process.env.HYPERLIQUID_API_URL : "https://api.hyperliquid.xyz",
   HYPERLIQUID_WS_URL: process.env.HYPERLIQUID_WS_URL && process.env.HYPERLIQUID_WS_URL.startsWith('ws') ? process.env.HYPERLIQUID_WS_URL : "wss://api.hyperliquid.xyz/ws",
-  DRY_RUN: false, // Default to live-trading unless toggled in UI
+  DRY_RUN: false, // Force execution to live
+  LIVE_TRADING: boolFromEnv("LIVE_TRADING", true),
+  ENABLE_ORDER_SUBMISSION: boolFromEnv("ENABLE_ORDER_SUBMISSION", true),
   PHASE_ONE_CONSERVATIVE: boolFromEnv("PHASE_ONE_CONSERVATIVE", true),
   MAX_OPEN_POSITIONS: Math.max(1, Math.floor(numFromEnv("MAX_OPEN_POSITIONS", 3))),
   API_BUDGET_ENABLED: boolFromEnv("API_BUDGET_ENABLED", true),
@@ -45,6 +47,12 @@ export const config = {
 };
 
 console.log(`[CONFIG_INITIALIZATION] Mode: ${config.DRY_RUN ? "DRY_RUN (Safe Simulation Mode)" : "LIVE TRADING (Real Capital Risk)"}`);
+if (config.LIVE_TRADING && config.DRY_RUN) {
+  throw new Error("Invalid config: LIVE_TRADING=true requires DRY_RUN=false");
+}
+if (config.LIVE_TRADING && !config.HYPERLIQUID_PRIVATE_KEY) {
+  throw new Error("Live trading blocked: missing private key");
+}
 if (!config.DRY_RUN) {
   console.log("======================================= SAFETY WARNING =======================================");
   console.log("⚠️  NOTICE: LIVE TRADING MODE IS ACTIVE IN ENGINE CONFIG!");

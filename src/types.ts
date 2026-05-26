@@ -95,25 +95,19 @@ export interface BotState {
   phaseDowngradeReason?: string | null;
   isUnified?: boolean;
   blocker: string | null;
+  liveModeEnabled?: boolean;
+  liveModeDiagnostics?: {
+    DRY_RUN: boolean;
+    LIVE_TRADING: boolean;
+    privateKeyPresent: boolean;
+    orderSubmissionEnabled: boolean;
+    exchangeMutationsAllowed: boolean;
+  };
   apiConnected: boolean;
   wssConnected: boolean;
   apiRateLimitUntil?: number;
-  apiBudget?: {
-    enabled: boolean;
-    degradedMode: boolean;
-    throttleReason: string;
-    restRequestsInWindow: number;
-    restBudgetLimit: number;
-    executionRequestsPerMin: number;
-    protectionRequestsPerMin: number;
-    tpSlRequestsPerMin: number;
-    scannerRequestsPerMin: number;
-    accountRequestsPerMin: number;
-    metadataRequestsPerMin: number;
-    cacheHits: number;
-    blockedRequests: number;
-    lastUpdated: number;
-  };
+  orderSubmittedFailedUntil?: number;
+  apiBudget?: any;
   routerBlockCooldowns?: Record<string, number>;
   positionSizeInvalidCooldowns?: Record<string, number>;
   executionAttemptsMap?: Record<string, number>;
@@ -241,7 +235,7 @@ export interface BotState {
   feeEfficiencyPauseUntil?: number;
   peakEquity?: number;
   drawdownPauseUntil?: number;
-  drawdownSeverity?: "NONE" | "SOFT" | "SOFT_LEVEL_1" | "SOFT_LEVEL_2" | "MODERATE" | "HARD";
+  drawdownSeverity?: "NONE" | "SOFT" | "SOFT_LEVEL_1" | "SOFT_LEVEL_2" | "MODERATE" | "HARD" | "SEVERE" | "ELEVATED_DRAWDOWN";
   drawdownOverrideActive?: boolean;
   drawdownRecoveryProgress?: number;
   drawdownTroughEquity?: number;

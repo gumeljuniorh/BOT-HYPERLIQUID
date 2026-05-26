@@ -25,7 +25,9 @@ import {
   Layers,
   Sparkles,
   ServerCrash,
-  Play
+  Play,
+  AlertCircle,
+  ShieldAlert
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -256,7 +258,7 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
           </div>
           <div className="text-[9px] text-[#848E9C] font-mono mt-1.5 flex justify-between">
             <span>Slots: <strong className="text-white">{bot.openPositions || 0}/{bot.configuredMaxPositions || 3}</strong></span>
-            <span className="text-amber-400 font-semibold">{bot.liveMode ? "LIVE ENGAGED" : "DRY RUN"}</span>
+            <span className={cn("font-semibold", bot.liveModeEnabled ? "text-[#0ECB81]" : "text-rose-450")}>{bot.liveModeEnabled ? "LIVE TRADING ACTIVE" : "LIVE TRADING BLOCKED"}</span>
           </div>
         </div>
       </div>
@@ -510,6 +512,9 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
                     activeSymbol={bot.activeSymbol} 
                     scansSinceLastEntry={bot.scansSinceLastEntry || 0}
                     isAdvancedMode={isAdvancedMode}
+                    usedPositions={bot.usedPositions || bot.openPositions || 0}
+                    configuredMaxPositions={bot.configuredMaxPositions || 3}
+                    availableSlots={bot.availableSlots || 0}
                   />
                 </motion.div>
               )}
@@ -782,88 +787,124 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
             </div>
           </div>
 
-          {/* Interactive Simulated Order Ledger depth block (Requirement 5) */}
-          <div id="order-depth-ledger" className="p-4 flex flex-col bg-[#0A0D10] select-none shrink-0 h-64 border-b border-[#1F252C] overflow-hidden">
-            <div className="flex justify-between items-center text-[10px] font-mono text-[#848E9C] font-bold uppercase tracking-wider mb-2 shrink-0">
-              <span className="flex items-center gap-1">
-                <Briefcase className="w-3.5 h-3.5 text-emerald-400" /> Depth Liquidity Queue
-              </span>
-              <div className="flex bg-[#232930] p-0.5 rounded text-[8px] border border-slate-700/60">
-                <button 
-                  onClick={() => setDepthSelection("BIDS_ASKS")}
-                  className={cn("px-1 rounded-sm cursor-pointer", depthSelection === "BIDS_ASKS" ? "bg-slate-600 text-white" : "text-slate-400")}
-                >
-                  B/A
-                </button>
-                <button 
-                  onClick={() => setDepthSelection("BIDS")}
-                  className={cn("px-1 rounded-sm cursor-pointer", depthSelection === "BIDS" ? "bg-emerald-500/20 text-emerald-400" : "text-slate-400")}
-                >
-                  Bids
-                </button>
-                <button 
-                  onClick={() => setDepthSelection("ASKS")}
-                  className={cn("px-1 rounded-sm cursor-pointer", depthSelection === "ASKS" ? "bg-rose-500/20 text-rose-450" : "text-slate-400")}
-                >
-                  Asks
-                </button>
+          {/* Execution Mode Diagnostics */}
+          {bot?.liveModeDiagnostics && (
+            <div id="execution-mode-telemetry" className="p-4 flex flex-col bg-[#0A0D10] select-none shrink-0 border-b border-[#1F252C]">
+              <div className="flex justify-between items-center text-[10px] font-mono text-[#848E9C] font-bold uppercase tracking-wider mb-3 shrink-0">
+                <span className="flex items-center gap-1">
+                  <ShieldAlert className="w-3.5 h-3.5 text-[#8A4FFF]" /> Trading Mode Diagnostics
+                </span>
+                <span className={cn("px-1.5 py-0.5 rounded text-[8px] tracking-wider", bot?.liveModeEnabled ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-450")}>
+                  {bot?.liveModeEnabled ? "LIVE OVERRIDE ACTIVE" : "LIVE TRADING BLOCKED"}
+                </span>
               </div>
-            </div>
-
-            <div className="flex-1 grid grid-cols-2 gap-3 text-[10px] font-mono overflow-hidden">
-              {/* Asks (Sell Side) */}
-              {(depthSelection === "BIDS_ASKS" || depthSelection === "ASKS") && (
-                <div id="depth-asks" className="flex flex-col min-h-0">
-                  <div className="text-rose-400 text-[9px] uppercase font-bold tracking-tight pb-1 mb-1 border-b border-[#232930] flex justify-between">
-                    <span>Ask Price</span>
-                    <span>Sz ({simulatedBook.symbol})</span>
-                  </div>
-                  <div className="flex-1 overflow-hidden space-y-1">
-                    {simulatedBook.asks.slice(0, 5).map((ask, i) => (
-                      <div key={i} className="flex justify-between items-center relative text-rose-400">
-                        <div 
-                          className="absolute right-0 top-0 bottom-0 bg-rose-500/5 transition-all duration-300" 
-                          style={{ width: `${Math.min(100, (ask.total / 15) * 100)}%` }}
-                        />
-                        <span className="font-bold relative z-10">${formatPrice(ask.px)}</span>
-                        <span className="text-slate-400 font-medium relative z-10">{ask.sz.toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
+              <div className="grid grid-cols-2 gap-2 text-[9px] font-mono text-slate-400 font-medium">
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>DRY_RUN:</span>
+                  <span className={bot?.liveModeDiagnostics?.DRY_RUN ? "text-amber-400" : "text-emerald-400"}>
+                    {bot?.liveModeDiagnostics?.DRY_RUN !== undefined ? (bot.liveModeDiagnostics.DRY_RUN ? "TRUE" : "FALSE") : "UNKNOWN"}
+                  </span>
                 </div>
-              )}
-
-              {/* Bids (Buy Side) */}
-              {(depthSelection === "BIDS_ASKS" || depthSelection === "BIDS") && (
-                <div id="depth-bids" className="flex flex-col min-h-0">
-                  <div className="text-emerald-400 text-[9px] uppercase font-bold tracking-tight pb-1 mb-1 border-b border-[#232930] flex justify-between">
-                    <span>Bid Price</span>
-                    <span>Sz ({simulatedBook.symbol})</span>
-                  </div>
-                  <div className="flex-1 overflow-hidden space-y-1">
-                    {simulatedBook.bids.slice(0, 5).map((bid, i) => (
-                      <div key={i} className="flex justify-between items-center relative text-[#0ECB81]">
-                        <div 
-                          className="absolute left-0 top-0 bottom-0 bg-[#0ECB81]/5 transition-all duration-300" 
-                          style={{ width: `${Math.min(100, (bid.total / 15) * 100)}%` }}
-                        />
-                        <span className="font-bold relative z-10">${formatPrice(bid.px)}</span>
-                        <span className="text-slate-400 font-medium relative z-10">{bid.sz.toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>LIVE_TRADING:</span>
+                  <span className={bot?.liveModeDiagnostics?.LIVE_TRADING ? "text-emerald-400" : "text-slate-500"}>
+                    {bot?.liveModeDiagnostics?.LIVE_TRADING !== undefined ? (bot.liveModeDiagnostics.LIVE_TRADING ? "TRUE" : "FALSE") : "UNKNOWN"}
+                  </span>
+                </div>
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>Has Private Key:</span>
+                  <span className={bot?.liveModeDiagnostics?.privateKeyPresent ? "text-emerald-400" : "text-rose-450"}>
+                    {bot?.liveModeDiagnostics?.privateKeyPresent !== undefined ? (bot.liveModeDiagnostics.privateKeyPresent ? "YES" : "NO") : "UNKNOWN"}
+                  </span>
+                </div>
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>Core Orders Enabled:</span>
+                  <span className={bot?.liveModeDiagnostics?.orderSubmissionEnabled ? "text-emerald-400" : "text-amber-500"}>
+                    {bot?.liveModeDiagnostics?.orderSubmissionEnabled !== undefined ? (bot.liveModeDiagnostics.orderSubmissionEnabled ? "YES" : "NO") : "UNKNOWN"}
+                  </span>
+                </div>
+              </div>
+              <div className={cn("mt-2 p-1.5 rounded text-center border text-[9.5px]", bot?.liveModeEnabled ? "bg-emerald-900/20 border-emerald-500/30 text-emerald-400" : "bg-rose-900/20 border-rose-500/30 text-rose-500")}>
+                 <span>Exchange Mutations: <strong>{bot?.liveModeDiagnostics?.exchangeMutationsAllowed ? "ALLOWED_AND_DISPATCHING" : "DISABLED_AND_LOCKED"}</strong></span>
+              </div>
+              {bot?.liveModeDiagnostics?.LIVE_TRADING && bot?.liveModeDiagnostics?.DRY_RUN && (
+                <div className="mt-2 p-1.5 bg-rose-950/40 border border-rose-500/50 rounded flex items-center gap-2">
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-450 shrink-0" />
+                  <span className="text-[9px] text-rose-400 font-medium">LIVE MODE REQUESTED BUT DRY_RUN STILL ENABLED</span>
                 </div>
               )}
             </div>
+          )}
 
-            <div className="text-[9px] text-[#848E9C] border-t border-[#1F252C] pt-1.5 flex justify-between shrink-0 font-mono">
-              <span className="flex items-center gap-1">
-                Spread: <strong className="text-slate-350">
-                  ${(Math.abs(simulatedBook.asks[0]?.px - simulatedBook.bids[0]?.px || 0.005)).toFixed(4)}
-                </strong>
-              </span>
-              <span>Updated automatically via socket stream</span>
-            </div>
+          {/* API Budget Limits Telemetry */}
+          <div id="api-budget-telemetry" className="p-4 flex flex-col bg-[#0A0D10] select-none shrink-0 border-b border-[#1F252C] overflow-hidden min-h-[220px]">
+             <div className="flex justify-between items-center text-[10px] font-mono text-[#848E9C] font-bold uppercase tracking-wider mb-3 shrink-0">
+               <span className="flex items-center gap-1">
+                 <ServerCrash className="w-3.5 h-3.5 text-[#8A4FFF]" /> API Budget & Rate Limits
+               </span>
+               <span className={cn("px-1.5 py-0.5 rounded text-[8px]", bot.apiBudget?.degradedMode ? "bg-amber-500/20 text-amber-500" : "bg-emerald-500/20 text-emerald-400")}>
+                 {bot.apiBudget?.degradedMode ? "DEGRADED" : "HEALTHY"}
+               </span>
+             </div>
+             
+             <div className="grid grid-cols-2 gap-3 mb-3">
+                 <div className="p-2 border border-slate-700/40 rounded bg-slate-800/20">
+                     <div className="text-[9px] text-slate-500 uppercase font-bold mb-1">REST Weight (1min)</div>
+                     <div className="flex items-baseline gap-1">
+                         <span className={cn("text-lg font-bold font-mono tracking-tighter", bot.apiBudget?.restWeightInWindow > 800 ? "text-rose-450" : bot.apiBudget?.restWeightInWindow > 600 ? "text-amber-400" : "text-emerald-400")}>
+                           {bot.apiBudget?.restWeightInWindow || 0}
+                         </span>
+                         <span className="text-[9px] text-slate-500 font-mono">/ {bot.apiBudget?.restWeightLimit || 1200}</span>
+                     </div>
+                 </div>
+                 <div className="p-2 border border-slate-700/40 rounded bg-slate-800/20">
+                     <div className="text-[9px] text-slate-500 uppercase font-bold mb-1">Address Exchange Actions</div>
+                     <div className="flex items-baseline gap-1">
+                         <span className={cn("text-lg font-bold font-mono tracking-tighter", (bot.apiBudget?.exchangeActionsLimit || 10000) < 500 ? "text-rose-450" : "text-emerald-400")}>
+                            {bot.apiBudget?.exchangeActionsLimit || 10000}
+                         </span>
+                         <span className="text-[9px] text-slate-500 font-mono">remaining</span>
+                     </div>
+                 </div>
+             </div>
+             
+             {bot.apiBudget?.addressLimitRecoveryActive && (
+               <div className="p-2 border border-rose-500/20 bg-rose-500/5 rounded mb-3">
+                 <div className="text-rose-400 text-[10px] font-bold uppercase flex items-center justify-between font-mono">
+                    <span>Address Limit Recovery</span>
+                    <span className="animate-pulse">ACTIVE 1/10s</span>
+                 </div>
+               </div>
+             )}
+
+             <div className="grid grid-cols-2 gap-3 text-[10px] font-mono mb-2">
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">WSS Connections:</span>
+                    <span className="text-slate-300 font-bold">{bot.apiBudget?.wsConnections || 1}/10</span>
+                 </div>
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">WSS Subscriptions:</span>
+                    <span className="text-slate-300 font-bold">{bot.apiBudget?.wsSubscriptions || 0}/1000</span>
+                 </div>
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">Executions (1m):</span>
+                    <span className="text-indigo-300 font-bold">{bot.apiBudget?.executionRequestsPerMin || 0}</span>
+                 </div>
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">Cache Hits:</span>
+                    <span className="text-teal-400 font-bold">{bot.apiBudget?.cacheHits || 0}</span>
+                 </div>
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">Blocks:</span>
+                    <span className="text-rose-400 font-bold">{bot.apiBudget?.blockedRequests || 0}</span>
+                 </div>
+                 <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
+                    <span className="text-slate-500">Throttle Status:</span>
+                    <span className={cn("font-bold truncate max-w-[80px]", bot.apiBudget?.throttleReason === "NONE" ? "text-emerald-400" : "text-amber-500")}>
+                      {bot.apiBudget?.throttleReason || "NONE"}
+                    </span>
+                 </div>
+             </div>
           </div>
         </div>
       </div>

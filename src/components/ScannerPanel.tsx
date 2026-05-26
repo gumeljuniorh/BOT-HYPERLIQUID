@@ -8,7 +8,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, activeSymbol, scansSinceLastEntry = 0, isAdvancedMode = false }: { opportunities: any[], activeSymbol: string, scansSinceLastEntry?: number, isAdvancedMode?: boolean }) {
+export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, activeSymbol, scansSinceLastEntry = 0, isAdvancedMode = false, usedPositions = 0, configuredMaxPositions = 1, availableSlots = 0 }: { opportunities: any[], activeSymbol: string, scansSinceLastEntry?: number, isAdvancedMode?: boolean, usedPositions?: number, configuredMaxPositions?: number, availableSlots?: number }) {
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: "asc" | "desc" }>({ key: "confidence", direction: "desc" });
 
   const sortedData = useMemo(() => {
@@ -139,11 +139,14 @@ export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, ac
             </span>
           </span>
         </div>
-        <div className="flex gap-4">
+        <div className="flex gap-4 items-center">
+          <div className="text-[10px] uppercase font-mono tracking-widest text-[#8A4FFF] border border-[#8A4FFF]/20 px-2 py-0.5 rounded bg-[#8A4FFF]/5 hidden md:block">
+            Slots: <span className="font-bold text-white">{usedPositions}</span> / {configuredMaxPositions} ({availableSlots} OPEN) {configuredMaxPositions >= 3 ? " [MULTI: ON]" : ""}
+          </div>
           <div className="text-[10px] uppercase font-mono tracking-widest text-slate-500 hidden md:block">
             Eligible: <span className="text-emerald-400">{eligibleCount}</span> | Rejected: <span className="text-rose-400">{rejectedCount}</span>
           </div>
-          <div className="text-[10px] uppercase font-mono tracking-widest text-indigo-400">
+          <div className="text-[10px] uppercase font-mono tracking-widest text-indigo-400 hidden xl:block">
             Scans: {scansSinceLastEntry}
           </div>
           <div className="text-[10px] uppercase font-mono tracking-widest text-[#8A4FFF]">
@@ -226,7 +229,9 @@ export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, ac
                     {opt.volatility}
                   </div>
                   <span className="md:hidden text-slate-600"> | </span>
-                  <div className="inline md:block text-slate-300 md:text-slate-400">{(opt.trendStrength * 100).toFixed(1)}%</div>
+                  <div className="inline md:block text-slate-300 md:text-slate-400">
+                    {opt.trendStrength === 0 && ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(opt.regime) ? "DATA_PENDING" : (opt.trendStrength * 100).toFixed(1) + "%"}
+                  </div>
                 </div>
               </div>
 
@@ -304,6 +309,34 @@ export const ScannerPanel = React.memo(function ScannerPanel({ opportunities, ac
                         </div>
                     )}
                   </div>
+                  
+                  {opt.finalExecutionScore !== undefined && (
+                      <div className="col-span-full mt-2 pt-2 border-t border-slate-800/60 grid grid-cols-2 md:grid-cols-5 gap-2 text-[8px] uppercase font-bold text-center">
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Priority Rank: <span className="text-teal-400 font-bold text-sm tracking-tighter">{opt.executionPriorityRank ? `#${opt.executionPriorityRank}` : "N/A"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Final Exec Score: <span className="text-[#8A4FFF] font-black text-sm tracking-tighter">{opt.finalExecutionScore}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             HL Local Score: <span className="text-emerald-400 font-bold">{opt.confidence}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             CMC Trend: <span className="text-amber-400 font-bold">{opt.cmcTrendScore !== undefined ? opt.cmcTrendScore : "N/A"}</span>
+                          </div>
+                          <div className={cn("p-1.5 rounded border bg-slate-900/60 text-slate-300 border-slate-800/80")}>
+                             Narrative: <span className="text-rose-400 font-bold">{opt.narrative || "N/A"}</span>
+                          </div>
+                      </div>
+                  )}
+
+                  {opt.rejectionReason === "LOW_PRIORITY_EXECUTION_SKIPPED" && (
+                      <div className="col-span-full mt-2 p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-500 text-[9px] leading-relaxed">
+                          <strong className="text-amber-400 uppercase mr-1">Skip Status:</strong> Delayed due to Low Priority Filter (Rank #{opt.executionPriorityRank} / {configuredMaxPositions} Max).<br/>
+                          <strong className="text-amber-400 uppercase mr-1">Next Re-evaluation:</strong> Next Active Market Cycle.<br/>
+                          <strong className="text-amber-400 uppercase mr-1">Promotion Triggers Needed:</strong> Confidence &gt;= 60, CMC Volatile Gem status, or Early Breakout expansion structure.
+                      </div>
+                  )}
                   
                   {/* Separate confirmation components */}
                   {opt.confidencePass !== undefined && (

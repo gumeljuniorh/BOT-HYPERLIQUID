@@ -49,38 +49,9 @@ export class HyperliquidExecutionEngine {
       console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only order allowed regardless of slot state`);
     }
 
-    if (config.DRY_RUN) {
-      // Simulate fill in bot state for dashboard awareness
-      const oid = `MOCK-${Math.floor(Math.random() * 1000000)}`;
-      botState.lastOrderId = oid;
-      botState.lastFillPrice = px;
-      
-      // Manually adjust botState for paper mode visualization
-      if (!reduceOnly) {
-        const simulatedPosition = {
-           coin: symbol,
-           szi: isBuy ? sz.toString() : (-sz).toString(),
-           entryPx: px.toString(),
-           unrealizedPnl: "0"
-        };
-        botState.positionDetails = simulatedPosition;
-        const otherPositions = (botState.allPositions || []).filter((p: any) => p.coin !== symbol);
-        botState.allPositions = [...otherPositions, simulatedPosition];
-        botState.openPositions = botState.allPositions.length;
-        // Recalculate slots after position change
-        calculatePositionSlots();
-      } else {
-        botState.allPositions = (botState.allPositions || []).filter((p: any) => p.coin !== symbol);
-        botState.openPositions = botState.allPositions.length;
-        botState.positionDetails = botState.allPositions[0] || null;
-        // Recalculate slots after position change
-        calculatePositionSlots();
-      }
-      return { status: "ok", oid };
-    } else {
-      // Real exchange request
-      const assetId = getAssetId(symbol);
-      const assetMeta = getAssetMeta(symbol);
+    // Real exchange request
+    const assetId = getAssetId(symbol);
+    const assetMeta = getAssetMeta(symbol);
 
       let formattedSz = Number(sz.toFixed(3)).toString();
       if (assetMeta && typeof assetMeta.szDecimals === "number") {
@@ -129,9 +100,9 @@ export class HyperliquidExecutionEngine {
             botState.lastApiError = status.error;
             
             if (status.error.includes("Too many cumulative requests sent")) {
-               botState.apiRateLimitUntil = Date.now() + 60000;
+               botState.apiRateLimitUntil = Date.now() + 300000;
                botState.blocker = "API_RATE_LIMIT_EXCEEDED";
-               console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit.`);
+               console.warn(`[API_RATE_LIMIT] Blocking execution for 300s due to cumulative rate limit.`);
             }
 
             // Special handling for reduceOnly errors
@@ -151,21 +122,15 @@ export class HyperliquidExecutionEngine {
         botState.lastApiError = errorDetail;
         
         if (errorDetail.includes("Too many cumulative requests sent")) {
-           botState.apiRateLimitUntil = Date.now() + 60000;
+           botState.apiRateLimitUntil = Date.now() + 300000;
            botState.blocker = "API_RATE_LIMIT_EXCEEDED";
-           console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit.`);
+           console.warn(`[API_RATE_LIMIT] Blocking execution for 300s due to cumulative rate limit.`);
         }
       }
       return null;
-    }
   }
 
   async cancelOrder(symbol: string, oid: number | string) {
-    if (config.DRY_RUN) {
-      console.log(`[DRY_RUN] Canceled order ${oid} for ${symbol}`);
-      return true;
-    }
-
     const action = {
       type: "cancel",
       cancels: [{
@@ -177,7 +142,7 @@ export class HyperliquidExecutionEngine {
     try {
       const result = await hClient.exchangeRequest(action);
       if (result && result.status === "err" && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
-         botState.apiRateLimitUntil = Date.now() + 60000;
+         botState.apiRateLimitUntil = Date.now() + 300000;
          botState.blocker = "API_RATE_LIMIT_EXCEEDED";
       }
       return result && result.status === "ok";
@@ -189,12 +154,6 @@ export class HyperliquidExecutionEngine {
 
   async cancelAllOrders(symbol?: string) {
     const coin = symbol || botState.activeSymbol;
-    if (config.DRY_RUN) {
-      console.log(`[DRY_RUN] Canceling all open orders for ${coin}.`);
-      botState.activeOrders = (botState.activeOrders || []).filter(o => o.coin !== coin);
-      return true;
-    }
-
     console.log(`Canceling all open orders for ${coin}.`);
     
     // Find orders for this coin
@@ -212,7 +171,7 @@ export class HyperliquidExecutionEngine {
     try {
       const result = await hClient.exchangeRequest(action);
       if (result && result.status === "err" && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent")) {
-         botState.apiRateLimitUntil = Date.now() + 60000;
+         botState.apiRateLimitUntil = Date.now() + 300000;
          botState.blocker = "API_RATE_LIMIT_EXCEEDED";
       }
       return result && result.status === "ok";
@@ -238,40 +197,6 @@ export class HyperliquidExecutionEngine {
       }
     }
 
-    if (config.DRY_RUN) {
-      console.log(`[DRY_RUN] Placed TP/SL for ${symbol}. TP: ${tpPrice}, SL: ${slPrice}`);
-      const existingNonProtectionOrders = (botState.activeOrders || []).filter((o: any) => !(o.coin === symbol && o.reduceOnly));
-      const protectionOrders: any[] = [];
-      if (tpPrice !== null && tpPrice !== undefined) {
-        protectionOrders.push({
-          oid: `MOCK-TP-${symbol}-${Date.now()}`,
-          coin: symbol,
-          reduceOnly: true,
-          isTrigger: false,
-          px: tpPrice.toString(),
-          limitPx: tpPrice.toString(),
-          sz: Math.abs(sz).toString()
-        });
-      }
-      protectionOrders.push({
-        oid: `MOCK-SL-${symbol}-${Date.now()}`,
-        coin: symbol,
-        reduceOnly: true,
-        isTrigger: true,
-        triggerPx: slPrice.toString(),
-        sz: Math.abs(sz).toString()
-      });
-      botState.activeOrders = [...existingNonProtectionOrders, ...protectionOrders];
-      botState.telemetry = {
-        ...(botState.telemetry || {}),
-        activeTpCount: tpPrice !== null && tpPrice !== undefined ? 1 : 0,
-        activeSlCount: 1,
-        duplicateProtectionWarnings: botState.telemetry?.duplicateProtectionWarnings || 0,
-        protectionSyncHealth: "HEALTHY"
-      };
-      return true;
-    }
-    
     const assetId = getAssetId(symbol);
     const assetMeta = getAssetMeta(symbol);
 
@@ -341,9 +266,9 @@ export class HyperliquidExecutionEngine {
        try {
            const cancelResult = await hClient.exchangeRequest({ type: "cancel", cancels });
            if (cancelResult && cancelResult.status === "err" && typeof cancelResult.response === "string" && cancelResult.response.includes("Too many cumulative requests sent")) {
-               botState.apiRateLimitUntil = Date.now() + 60000;
+               botState.apiRateLimitUntil = Date.now() + 300000;
                botState.blocker = "API_RATE_LIMIT_EXCEEDED";
-               console.warn(`[API_BUDGET_THROTTLED] Deferred TP/SL cancel due to global API limits.`);
+               console.warn(`[API_BUDGET_THROTTLED] Deferred TP/SL cancel due to global API limits. (300s backoff)`);
                return false;
            }
            // Optimistically remove cancelled orders from local state
@@ -401,9 +326,9 @@ export class HyperliquidExecutionEngine {
          const errDetail = JSON.stringify(result || {});
          console.error(`[EXECUTOR] Failed to place TP/SL orders: `, errDetail);
          if (errDetail.includes("Too many cumulative requests sent") || (result && result.response && typeof result.response === "string" && result.response.includes("Too many cumulative requests sent"))) {
-             botState.apiRateLimitUntil = Date.now() + 60000;
+             botState.apiRateLimitUntil = Date.now() + 300000;
              botState.blocker = "API_RATE_LIMIT_EXCEEDED";
-             console.warn(`[API_RATE_LIMIT] Blocking execution for 60s due to cumulative rate limit (TP/SL trigger).`);
+             console.warn(`[API_RATE_LIMIT] Blocking execution for 300s due to cumulative rate limit (TP/SL trigger).`);
          }
          return false;
       }

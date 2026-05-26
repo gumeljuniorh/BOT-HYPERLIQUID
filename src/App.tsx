@@ -608,7 +608,20 @@ function AppContent() {
       "PROTECTING_OPEN_POSITION"
     ];
 
-    const isPaused = b && (pauseBlockers.includes(b) || b.includes("PAUSE") || b.includes("COOLDOWN") || b.includes("LOCK") || b.includes("LIMIT") || b.includes("SUSPENDED"));
+    const isRestPressure = b === "EXECUTION_LAYER_THROTTLED" || b === "SYSTEM_REST_PAUSED" || b === "REST_PRESSURE_DEGRADED_MODE" || b === "API_RATE_LIMIT_EXCEEDED" || b === "API_CUMULATIVE_LIMIT_EXCEEDED";
+
+    const isPaused = !isRestPressure && b && (pauseBlockers.includes(b) || b.includes("PAUSE") || b.includes("COOLDOWN") || b.includes("LOCK") || b.includes("LIMIT") || b.includes("SUSPENDED"));
+
+    if (isRestPressure) {
+        return {
+          category: "DEGRADED" as const,
+          badgeLabel: "API BUDGET PRESSURE DYNAMIC MODE",
+          title: "REST Pressure Degraded Mode",
+          description: "WSS monitoring active. Existing positions monitored and protected. Full universe scanner and new entries constrained dynamically to respect HL quotas.",
+          colorClass: "bg-[#8A4FFF]/5 border-[#8A4FFF]/20 text-[#8A4FFF] shadow-[0_0_20px_rgba(138,79,255,0.05)]",
+          badgeClass: "bg-[#8A4FFF]/10 text-[#8A4FFF] border border-[#8A4FFF]/20"
+        };
+    }
 
     if (isPaused) {
       let title = "Protected Pause Active";
@@ -675,7 +688,7 @@ function AppContent() {
       else if (b === "STRICT_CONFIRMATION_REQUIRED") { title = "Waiting for Valid Setup"; desc = "Awaiting strict 3-candle momentum confirmation before committing entry order."; }
       else if (b === "LOW_VOLATILITY") { title = "Chop Detected — Entries Paused"; desc = "Low volatility noise filter active. Restfully waiting for volatility expansion blocks."; }
       else if (b === "PRE_BREAKOUT_WATCH") { title = "Waiting for Valid Setup"; desc = "Awaiting pre-breakout setup validation to enter on momentum velocity close."; }
-      else if (b === "DRY_RUN ENABLED") { title = "Monitoring Market Conditions"; desc = "Simulated execution active. Scanning and tracking virtual contracts."; }
+      else if (b === "LIVE TRADING BLOCKED — CONFIGURATION REQUIRED") { title = "Engine Safely Handbraked"; desc = "Provide secrets & enable live trading config variables to continue."; }
       else { title = "Monitoring Market Conditions"; desc = b; }
     }
 
@@ -733,62 +746,6 @@ function AppContent() {
         </div>
 
         <div className="flex items-center space-x-4 md:space-x-6">
-          {/* Trading Execution Mode segmented control */}
-          <div className="flex bg-[#0B0E11] p-0.5 rounded border border-[#2B3139] items-center">
-            <button 
-              onClick={async () => {
-                try {
-                  const res = await fetch("/api/toggle-dry-run", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ dryRun: true })
-                  });
-                  if (res.ok) {
-                    const data = await res.json();
-                    setStatus((s: any) => s ? { ...s, bot: { ...s.bot, dryRun: data.dryRun, blocker: data.blocker } } : s);
-                  }
-                } catch (e) {
-                  console.error("Failed to toggle dry run mode:", e);
-                }
-              }}
-              className={cn(
-                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none gap-1",
-                bot.dryRun
-                  ? "bg-[#2B3139] text-amber-400"
-                  : "text-[#848E9C] hover:text-amber-400"
-              )}
-            >
-              <span className={cn("w-1.5 h-1.5 rounded-full", bot.dryRun ? "bg-amber-400" : "bg-transparent border border-[#848E9C]")}></span>
-              Simulated
-            </button>
-            <button 
-              onClick={async () => {
-                try {
-                  const res = await fetch("/api/toggle-dry-run", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ dryRun: false })
-                  });
-                  if (res.ok) {
-                    const data = await res.json();
-                    setStatus((s: any) => s ? { ...s, bot: { ...s.bot, dryRun: data.dryRun, blocker: data.blocker } } : s);
-                  }
-                } catch (e) {
-                  console.error("Failed to toggle dry run mode:", e);
-                }
-              }}
-              className={cn(
-                "px-3 py-1 text-[11px] font-medium rounded-sm transition-all h-6 flex items-center cursor-pointer border-none gap-1",
-                !bot.dryRun
-                  ? "bg-[#2B3139] text-[#0ECB81]"
-                  : "text-[#848E9C] hover:text-[#0ECB81]"
-              )}
-            >
-              <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", !bot.dryRun ? "bg-[#0ECB81]" : "bg-transparent border border-[#848E9C]")}></span>
-              Live Trading
-            </button>
-          </div>
-
           {/* Mode Toggle Segmented Control */}
           <div className="flex bg-[#0B0E11] p-0.5 rounded border border-[#2B3139]">
             <button 
@@ -831,7 +788,7 @@ function AppContent() {
           <div className="flex items-center space-x-4 px-3 py-1 md:px-4 md:py-1 hover:bg-[#2B3139] transition-colors rounded cursor-pointer" onClick={() => setIsSettingsOpen(true)}>
             <div className="text-right hidden sm:block">
               <p className="text-[10px] text-[#848E9C] leading-none mb-0.5">Mark Price</p>
-              <p className="text-xs font-mono font-bold text-[#EAECEF]">${bot.markPrice.toFixed(2)}</p>
+              <p className="text-xs font-mono font-bold text-[#EAECEF]">${(bot.markPrice || 0).toFixed(2)}</p>
             </div>
             <div className="h-6 w-px bg-[#2B3139] hidden sm:block"></div>
             <div className="text-right">
@@ -1436,12 +1393,12 @@ function AppContent() {
                   </div>
                 </div>
                 
-                {Object.keys(bot.analytics.participationAudit.finalExecutionVetoes || {}).length > 0 && (
+                {Object.keys(bot?.analytics?.participationAudit?.finalExecutionVetoes || {}).length > 0 && (
                    <div className="mt-2 text-[10px] font-mono text-slate-400 border border-slate-800/50 rounded-lg p-2.5 bg-black/50">
                      <span className="text-slate-500 mb-1 block uppercase font-bold tracking-widest text-[8px]">Final Execution Trace (Near-Valid Setups)</span>
                      <div className="flex flex-wrap gap-x-4 gap-y-1">
-                       {Object.entries(bot.analytics.participationAudit.finalExecutionVetoes).map(([sym, reason]) => (
-                         <div key={sym}><strong className="text-indigo-400">{sym}:</strong> {reason}</div>
+                       {Object.entries(bot?.analytics?.participationAudit?.finalExecutionVetoes || {}).map(([sym, reason]) => (
+                         <div key={sym}><strong className="text-indigo-400">{sym}:</strong> {reason as string}</div>
                        ))}
                      </div>
                    </div>
@@ -2002,8 +1959,12 @@ function AppContent() {
                                   <td className="py-2 px-2 text-center text-slate-300">{setup.confidence}%</td>
                                   <td className="py-2 px-2 text-center text-slate-400">{setup.requiredConfidence}%</td>
                                   <td className="py-2 px-2 text-center text-slate-400">{setup.regime}</td>
-                                  <td className="py-2 px-2 text-center text-slate-300">{(setup.trendStrength * 100).toFixed(1)}%</td>
-                                  <td className="py-2 px-2 text-center text-slate-300">{(setup.volatility * 100).toFixed(1)}%</td>
+                                  <td className="py-2 px-2 text-center text-slate-300">
+                                    {(setup.trendStrength === 0 || setup.trendStrength < 0.001) && ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(setup.regime) ? "DATA_PENDING" : (setup.trendStrength * 100).toFixed(1) + "%"}
+                                  </td>
+                                  <td className="py-2 px-2 text-center text-slate-300">
+                                    {(setup.volatility === 0 || setup.volatility < 0.001) && ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(setup.regime) ? "DATA_PENDING" : (setup.volatility * 100).toFixed(1) + "%"}
+                                  </td>
                                   <td className="py-2 pl-2 text-right text-orange-400/90 italic">{setup.rejectionReason}</td>
                                 </tr>
                                 {setup.trendPhase && (
@@ -2082,8 +2043,12 @@ function AppContent() {
                                 <td className="py-2 px-2 text-center text-slate-300">{setup.confidence}%</td>
                                 <td className="py-2 px-2 text-center text-slate-400">{setup.requiredConfidence}%</td>
                                 <td className="py-2 px-2 text-center text-slate-400">{setup.regime}</td>
-                                <td className="py-2 px-2 text-center text-slate-300">{(setup.trendStrength * 100).toFixed(1)}%</td>
-                                <td className="py-2 px-2 text-center text-slate-300">{(setup.volatility * 100).toFixed(1)}%</td>
+                                <td className="py-2 px-2 text-center text-slate-300">
+                                  {(setup.trendStrength === 0 || setup.trendStrength < 0.001) && ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(setup.regime) ? "DATA_PENDING" : (setup.trendStrength * 100).toFixed(1) + "%"}
+                                </td>
+                                <td className="py-2 px-2 text-center text-slate-300">
+                                  {(setup.volatility === 0 || setup.volatility < 0.001) && ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(setup.regime) ? "DATA_PENDING" : (setup.volatility * 100).toFixed(1) + "%"}
+                                </td>
                                 <td className="py-2 pl-2 text-right text-orange-400/90 italic">{setup.rejectionReason}</td>
                               </tr>
                               {setup.trendPhase && (
@@ -2156,7 +2121,7 @@ function AppContent() {
                       <DiagnosticRow label="Drawdown Pause" value={(bot.drawdownPauseUntil && bot.drawdownPauseUntil > Date.now()) ? `${Math.round((bot.drawdownPauseUntil - Date.now())/1000/60)}m` : "NONE"} />
                       <DiagnosticRow label="Cloud Run ID" value={bot.cloudRunId || "LOCAL"} />
                       <DiagnosticRow 
-                        label="HYPE-USDC_STATUS" 
+                        label="HYPE_STATUS" 
                         value={bot.hypeStatus || "FOUND"} 
                         status={bot.hypeStatus === "ACTIVE_IN_SCANNER" ? "success" : bot.hypeStatus?.startsWith("FILTERED_OUT_REASON") ? "error" : "neutral"} 
                       />

@@ -121,8 +121,8 @@ export class HyperliquidStrategy {
     const activeCandles = [...candles];
     if (currentCandle) activeCandles.push(currentCandle);
 
-    if (activeCandles.length < 15 && symbol === "HYPE-USDC") {
-      const price = (botState.markPrices && botState.markPrices["HYPE-USDC"]) || botState.markPrice || 10;
+    if (activeCandles.length < 15 && symbol === "HYPE") {
+      const price = (botState.markPrices && botState.markPrices["HYPE"]) || botState.markPrice || 10;
       while (activeCandles.length < 15) {
         activeCandles.unshift({
           timestamp: Date.now() - activeCandles.length * 10000,
@@ -336,7 +336,9 @@ export class HyperliquidStrategy {
     baseScore += 5; // liquidity quality
     baseScore += (momentumScore > 0.5 ? 5 : 0); // volume/momentum proxy
 
-    if (isExpectedMoveValid || marketRegime === "PRE_BREAKOUT_MOMENTUM" || marketRegime === "MOMENTUM_BUILDING") {
+    const isEarlyExpansionRegime = ["HEALTHY_LOW_VOL_EXPANSION", "LOW_VOL_SQUEEZE", "PRE_BREAKOUT_COMPRESSION", "EARLY_DIRECTIONAL_EXPANSION", "PRE_BREAKOUT_MOMENTUM", "MOMENTUM_BUILDING"].includes(marketRegime);
+
+    if (isExpectedMoveValid || isEarlyExpansionRegime) {
       const isReversalRegime = (marketRegime === "EXHAUSTION_REVERSAL" || marketRegime === "LIQUIDATION_SWEEP");
 
       if (isEmaBullish && rsi14 > 50) {
@@ -509,8 +511,38 @@ export class HyperliquidStrategy {
     
     finalConfidence = Math.max(10, confidence - totalPenalty);
 
+    if (isEarlyExpansionRegime) {
+      if (totalPenalty > 0 && activePenalties.some(p => p.name === "DEAD_LOW_VOL" || p.name === "RANGING_CHOP")) {
+         console.log(`[LOW_VOL_NOT_DEAD_VOL_CONFIRMED] Removing restrictive penalty for ${symbol} in valid restructure: ${marketRegime}`);
+         // Re-add the penalty value we incorrectly took away, effectively wiping it
+         const removedPenalty = activePenalties.find(p => p.name === "DEAD_LOW_VOL" || p.name === "RANGING_CHOP")?.value || totalPenalty;
+         finalConfidence = Math.max(10, confidence - (totalPenalty - removedPenalty));
+      }
+
+      let minConfidence = 35;
+      const matchedCmc = botState.cmcIntelligence?.assets.find((a: any) => a.matchedSymbol === symbol || a.symbol === symbol);
+      if (matchedCmc && matchedCmc.trendScore > 50) {
+         minConfidence = Math.max(minConfidence, 55);
+      }
+      if (momentumScore > 0.6 || consecutiveCandlesCount >= 2 || (matchedCmc && (matchedCmc.momentumPersistenceScore || 0) > 60)) {
+         minConfidence = Math.max(minConfidence, 65);
+      }
+      
+      // Let liquidity / spread boost if we have > 70. But since we don't have access to the direct spread value here, we proxy it.
+      // E.g. we add 10 to floor if we have an expected move valid.
+      if (isExpectedMoveValid) {
+         minConfidence = Math.max(minConfidence, 45);
+      }
+
+      if (finalConfidence < minConfidence) {
+         console.log(`[HEALTHY_LOW_VOL_CONFIDENCE_FLOOR_APPLIED] Boosting ${symbol} from ${finalConfidence} to ${minConfidence} for ${marketRegime}.`);
+         finalConfidence = minConfidence;
+         console.log(`[LOW_VOL_EXPANSION_SCORE_REBUILT] ${symbol} correctly classified as early expansion.`);
+      }
+    }
+
     // Log if penalty stack collapse detected
-    if (baseConfidenceCap >= 50 && finalConfidence < 35 && symbol === "HYPE-USDC") {
+    if (baseConfidenceCap >= 50 && finalConfidence < 35 && symbol === "HYPE") {
        console.log(`[PENALTY_STACK_COLLAPSE_DETECTED] ${symbol} | Base Conf: ${baseConfidenceCap} | Final Conf: ${finalConfidence} | Penalties: ${penaltyStackReason.join(", ")}`);
     }
 

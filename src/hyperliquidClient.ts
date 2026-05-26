@@ -89,7 +89,7 @@ export class HyperliquidClient {
       return cached.data; // deduplicate/cache return
     }
 
-    const budget = apiBudgetManager.reserve(lane, payload?.type || "info");
+    const budget = apiBudgetManager.reserveInfo(lane, payload?.type || "info");
     botState.apiBudget = apiBudgetManager.getSnapshot();
     if (!budget.allowed) {
       if (cached) {
@@ -155,7 +155,11 @@ export class HyperliquidClient {
 
     const lane = exchangeLaneForAction(action);
     const isCriticalProtection = lane === "protection" || lane === "tpsl";
-    const budget = apiBudgetManager.reserve(lane, action?.type || "exchange", isCriticalProtection);
+    let batchLength = 1;
+    if (action?.type === "order" && action.orders) batchLength = action.orders.length;
+    if (action?.type === "cancel" && action.cancels) batchLength = action.cancels.length;
+
+    const budget = apiBudgetManager.reserveExchange(lane, batchLength, isCriticalProtection);
     botState.apiBudget = apiBudgetManager.getSnapshot();
     if (!budget.allowed) {
       console.warn(`[EXECUTION_BUDGET_EXCEEDED] Exchange request suppressed. lane=${lane}, action=${action?.type || "unknown"}, reason=${budget.reason}`);

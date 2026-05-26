@@ -230,35 +230,19 @@ export const botState: BotState = {
 
 export const HYPE_MAPPING = {
   displaySymbol: "HYPE",
-  exchangeSymbol: "HYPE-USDC",
-  scannerSymbol: "HYPE-USDC",
-  tradableSymbol: "HYPE-USDC",
+  exchangeSymbol: "HYPE",
+  scannerSymbol: "HYPE",
+  tradableSymbol: "HYPE",
 };
 
 export function normalizeSymbol(sym: string): string {
   if (!sym) return sym;
-  const upper = sym.toUpperCase().trim();
-  if (upper === "HYPE" || upper === "HYPE-PERP" || upper === "HYPEUSDC" || upper === "HYPE-USDC") {
-    return "HYPE-USDC";
-  }
-  return sym;
+  return sym.toUpperCase().trim();
 }
 
 let assetMeta: any[] | null = null;
 
 export function setAssetMeta(meta: any[]) {
-  if (meta && Array.isArray(meta)) {
-    const hasHype = meta.some((v: any) => v.name === "HYPE-USDC");
-    if (!hasHype) {
-      meta.push({
-        name: "HYPE-USDC",
-        szDecimals: 4,
-        maxLeverage: 10,
-        isSpot: true,
-        onlySpot: true
-      });
-    }
-  }
   assetMeta = meta;
 }
 
@@ -281,26 +265,8 @@ export function getAssetId(symbol: string): number {
 export function getAssetMeta(symbol: string): any {
   const normSym = normalizeSymbol(symbol);
   if (!assetMeta) {
-    if (normSym === "HYPE-USDC") {
-      return {
-        name: "HYPE-USDC",
-        szDecimals: 4,
-        maxLeverage: 10,
-        isSpot: true,
-        onlySpot: true
-      };
-    }
     return null;
   }
   let asset = assetMeta.find((v: any) => v.name === normSym);
-  if (!asset && normSym === "HYPE-USDC") {
-    asset = {
-      name: "HYPE-USDC",
-      szDecimals: 4,
-      maxLeverage: 10,
-      isSpot: true,
-      onlySpot: true
-    };
-  }
   return asset;
 }
