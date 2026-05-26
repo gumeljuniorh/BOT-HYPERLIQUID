@@ -118,7 +118,7 @@ export class HyperliquidExecutionEngine {
         } catch (e) {
           errorDetail = "Circular or too complex response object";
         }
-        console.error("Order failed:", errorDetail);
+        if (errorDetail.includes("Too many cumulative requests")) { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error("Order failed:", errorDetail); }
         botState.lastApiError = errorDetail;
         
         if (errorDetail.includes("Too many cumulative requests sent")) {

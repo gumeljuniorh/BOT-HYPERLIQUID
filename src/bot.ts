@@ -6094,19 +6094,18 @@ async function handleTradingLogic(isEmergencyMode = false) {
         // Exact recovery handlers for failed entry execute
         if (!order && botState.lastApiError) {
             const err = botState.lastApiError.toLowerCase();
-            console.log(`[EXECUTION_RECOVERY_ATTEMPT] Order failed: ${botState.lastApiError}`);
-            console.log(`[ORDER_FAILURE_SELF_REPAIR_STARTED] Commencing automatic recovery for order on ${botState.activeSymbol}.`);
             
             if (
               err.includes("rate limit") || 
               err.includes("rate_limit") || 
               err.includes("too many cumulative") || 
               err.includes("backoff") || 
-              err.includes("exceeded")
+              err.includes("exceeded") ||
+              err.includes("volume traded")
             ) {
                 console.log("[EXECUTION_FAILURE_CLASSIFIED] RATE_LIMIT_ORDER_FAILED");
                 console.log("[ORDER_RETRY_SUPPRESSED_API_BUDGET] Suppressing automatic retry due to active budget constraint.");
-                botState.executionThrottleUntil = Date.now() + 30000; // 30s throttle, not 120s global cooldown
+                botState.executionThrottleUntil = Date.now() + 30000; // 30s throttle
                 botState.blocker = "API_RATE_LIMIT_EXCEEDED";
                 botState.analytics.lessons = botState.analytics.lessons || [];
                 
@@ -6116,7 +6115,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
                 } else {
                     botState.analytics.lessons.push(`${botState.activeSymbol}: API_BUDGET_LIMIT → COOLDOWN_120S`);
                 }
-            } else if (err.includes("auth") || err.includes("key") || err.includes("signer")) {
+            } else {
+                console.log(`[EXECUTION_RECOVERY_ATTEMPT] Order failed: ${botState.lastApiError}`);
+                console.log(`[ORDER_FAILURE_SELF_REPAIR_STARTED] Commencing automatic recovery for order on ${botState.activeSymbol}.`);
+            
+                if (err.includes("auth") || err.includes("key") || err.includes("signer")) {
                 console.log("[EXECUTION_FAILURE_CLASSIFIED] PRIVATE_KEY_MISSING");
                 console.log("[ORDER_FAILURE_UNRECOVERABLE_CLASSIFIED] Unrecoverable authentication error.");
                 botState.liveModeEnabled = false;
@@ -6189,6 +6192,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
                 botState.blocker = `EXCHANGE_REJECTED_UNRECOVERABLE: ${err.substring(0, 30)}`;
             }
             
+            }
+
             if (order) {
                 console.log(`[ORDER_SUBMISSION_RECOVERED] Order successfully placed during self-repair phase!`);
                 botState.lastApiError = null; // Clean up the trace so it resolves properly!
@@ -6311,7 +6316,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
           }
           console.log(`ORDER_SUBMITTED_SUCCESSFULLY: ${botState.activeSymbol} filled at ${fillPrice}.`);
         } else {
-          console.error("BOT: Entry order failed. No protection active.");
+          if (botState.blocker === "API_RATE_LIMIT_EXCEEDED" || (botState.lastApiError && botState.lastApiError.includes("cumulative volume"))) {
+              console.warn("BOT: Entry order deferred due to Hyperliquid API Budget constraints. No protection active.");
+          } else {
+              console.error("BOT: Entry order failed. No protection active.");
+          }
           botState.cooldownOverrideActive = false; // Reset override on failure
           botState.feePauseOverrideActive = false;
           
