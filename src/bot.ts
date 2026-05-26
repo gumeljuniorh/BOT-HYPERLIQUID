@@ -6103,7 +6103,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
               err.includes("exceeded") ||
               err.includes("volume traded")
             ) {
-                console.log("[EXECUTION_FAILURE_CLASSIFIED] RATE_LIMIT_ORDER_FAILED");
+                console.log("[BUDGET_ENFORCER] Entry deferred for API budget recharge.");
                 console.log("[ORDER_RETRY_SUPPRESSED_API_BUDGET] Suppressing automatic retry due to active budget constraint.");
                 botState.executionThrottleUntil = Date.now() + 30000; // 30s throttle
                 botState.blocker = "API_RATE_LIMIT_EXCEEDED";
@@ -6316,7 +6316,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           }
           console.log(`ORDER_SUBMITTED_SUCCESSFULLY: ${botState.activeSymbol} filled at ${fillPrice}.`);
         } else {
-          if (botState.blocker === "API_RATE_LIMIT_EXCEEDED" || (botState.lastApiError && botState.lastApiError.includes("cumulative volume"))) {
+          if (botState.blocker === "API_RATE_LIMIT_EXCEEDED" || (botState.lastApiError && (botState.lastApiError.includes("cumulative volume") || botState.lastApiError.includes("cumulative request")))) {
               console.warn("BOT: Entry order deferred due to Hyperliquid API Budget constraints. No protection active.");
           } else {
               console.error("BOT: Entry order failed. No protection active.");

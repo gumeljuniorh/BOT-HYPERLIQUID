@@ -96,7 +96,7 @@ export class HyperliquidExecutionEngine {
             calculatePositionSlots();
             return result;
           } else if (status.error) {
-            console.error(`Order returned API error: ${status.error}`);
+            if (status.error.includes("Too many cumulative requests")) { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error(`Order returned API error: ${status.error}`); }
             botState.lastApiError = status.error;
             
             if (status.error.includes("Too many cumulative requests sent")) {
