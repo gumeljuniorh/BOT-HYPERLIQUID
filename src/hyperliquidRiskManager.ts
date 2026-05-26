@@ -5,6 +5,10 @@ import { hClient } from "./hyperliquidClient.js";
 export class HyperliquidRiskManager {
   checkRisk(symbol: string = botState.activeSymbol): boolean {
     if (!config.HYPERLIQUID_PRIVATE_KEY) {
+      if (config.DRY_RUN) {
+        console.warn(`[DRY_RUN_RISK_CHECK] symbol=${symbol}, private key missing but dry-run mode allows simulated execution only.`);
+        return true;
+      }
       botState.blocker = "PRIVATE_KEY_MISSING. PLEASE ADD IT IN THE SETTINGS.";
       console.warn(`[ENTRY_BLOCKED] symbol=${symbol}, reason=EXECUTION_VALIDATION, detail=PRIVATE_KEY_MISSING`);
       return false;

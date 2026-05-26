@@ -19,6 +19,19 @@ export function formatHyperliquidPrice(px: number): string {
   return formattedPx;
 }
 
+export function classifyExchangeRejection(error: string): string {
+  const normalized = (error || "").toLowerCase();
+  if (normalized.includes("auth") || normalized.includes("signer") || normalized.includes("private key") || normalized.includes("signature")) return "AUTH_FAILURE";
+  if (normalized.includes("rate limit") || normalized.includes("too many cumulative") || normalized.includes("exceeded") || normalized.includes("volume traded")) return "API_RATE_LIMIT";
+  if (normalized.includes("margin") || normalized.includes("insufficient") || normalized.includes("funds")) return "INSUFFICIENT_MARGIN";
+  if (normalized.includes("ioc") || normalized.includes("not filled") || normalized.includes("would immediately")) return "IOC_NOT_FILLED";
+  if (normalized.includes("trigger") || normalized.includes("tp") || normalized.includes("sl") || normalized.includes("stop")) return "TP_SL_TRIGGER_INVALID";
+  if (normalized.includes("tick") || normalized.includes("price") || normalized.includes("precision")) return "INVALID_PRICE_PRECISION";
+  if (normalized.includes("notional") || normalized.includes("minimum")) return "MIN_NOTIONAL_FAILED";
+  if (normalized.includes("size") || normalized.includes("sz") || normalized.includes("out of range")) return "INVALID_ORDER_SIZE";
+  return "UNKNOWN_EXCHANGE_REJECTION";
+}
+
 export class HyperliquidExecutionEngine {
   async placeOrder(symbol: string, isBuy: boolean, sz: number, px: number, reduceOnly: boolean, isIoc: boolean = false) {
     const validation = executionValidationGuard.validateOrderIntent({ symbol, isBuy, size: sz, price: px, reduceOnly });
@@ -49,6 +62,57 @@ export class HyperliquidExecutionEngine {
       console.log(`[REDUCE_ONLY_ORDER_BYPASS_SLOTS] Reduce-only order allowed regardless of slot state`);
     }
 
+    if (config.DRY_RUN) {
+      const oid = `MOCK-${Math.floor(Math.random() * 1000000)}`;
+      botState.lastOrderId = oid;
+      botState.lastFillPrice = px;
+      botState.lastApiError = null;
+
+      if (!reduceOnly) {
+        const signedSize = isBuy ? Math.abs(sz) : -Math.abs(sz);
+        const existing = botState.allPositions?.find((position: any) => position.coin === symbol);
+        if (existing) {
+          existing.szi = (parseFloat(existing.szi || "0") + signedSize).toString();
+          existing.entryPx = px.toString();
+          existing.unrealizedPnl = existing.unrealizedPnl || "0";
+        } else {
+          botState.allPositions = [
+            ...(botState.allPositions || []),
+            {
+              coin: symbol,
+              szi: signedSize.toString(),
+              entryPx: px.toString(),
+              unrealizedPnl: "0"
+            }
+          ];
+        }
+        botState.positionDetails = {
+          coin: symbol,
+          szi: signedSize.toString(),
+          entryPx: px.toString(),
+          unrealizedPnl: "0"
+        };
+        console.log(`[DRY_RUN_ORDER_FILLED] Simulated entry fill for ${symbol}. oid=${oid}, size=${sz}, price=${px}`);
+        calculatePositionSlots();
+        return { status: "ok", response: { data: { statuses: [{ filled: { oid, avgPx: px.toString(), totalSz: sz.toString() } }] } } };
+      }
+
+      botState.activeOrders = [
+        ...(botState.activeOrders || []),
+        {
+          coin: symbol,
+          oid,
+          reduceOnly: true,
+          sz: Math.abs(sz).toString(),
+          limitPx: px.toString(),
+          px: px.toString(),
+          timestamp: Date.now()
+        }
+      ];
+      console.log(`[DRY_RUN_REDUCE_ONLY_ORDER_PLACED] Simulated reduce-only order for ${symbol}. oid=${oid}, size=${sz}, price=${px}`);
+      return { status: "ok", response: { data: { statuses: [{ resting: { oid } }] } } };
+    }
+
     // Real exchange request
     const assetId = getAssetId(symbol);
     const assetMeta = getAssetMeta(symbol);
@@ -74,6 +138,7 @@ export class HyperliquidExecutionEngine {
         grouping: "na"
       };
 
+      console.log(`[ORDER_SUBMISSION_DIAGNOSTIC] symbol=${symbol}, side=${side}, reduceOnly=${reduceOnly}, tif=${isIoc ? "Ioc" : "Gtc"}, size=${formattedSz}, price=${formattedPx}, assetId=${assetId}`);
       const result = await hClient.exchangeRequest(action);
       if (result && result.status === "ok") {
         const statuses = result.response.data.statuses;
@@ -96,13 +161,16 @@ export class HyperliquidExecutionEngine {
             calculatePositionSlots();
             return result;
           } else if (status.error) {
-            if (status.error.includes("Too many cumulative requests")) { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error(`Order returned API error: ${status.error}`); }
-            botState.lastApiError = status.error;
+            const classification = classifyExchangeRejection(status.error);
+            if (classification === "API_RATE_LIMIT") { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error(`Order returned API error: ${status.error}`); }
+            console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${status.error}`);
+            botState.lastApiError = `${classification}: ${status.error}`;
             
-            if (status.error.includes("Too many cumulative requests sent")) {
+            if (classification === "API_RATE_LIMIT" && status.error.includes("Too many cumulative requests sent")) {
                botState.apiRateLimitUntil = Date.now() + 300000;
                botState.blocker = "API_RATE_LIMIT_EXCEEDED";
                console.warn(`[API_RATE_LIMIT] Blocking execution for 300s due to cumulative rate limit.`);
+               console.warn(`[ORDER_REJECTION_COOLDOWN_APPLIED] symbol=${symbol}, classification=${classification}, cooldownMs=300000`);
             }
 
             // Special handling for reduceOnly errors
@@ -118,19 +186,29 @@ export class HyperliquidExecutionEngine {
         } catch (e) {
           errorDetail = "Circular or too complex response object";
         }
-        if (errorDetail.includes("Too many cumulative requests")) { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error("Order failed:", errorDetail); }
-        botState.lastApiError = errorDetail;
+        const classification = classifyExchangeRejection(errorDetail);
+        if (classification === "API_RATE_LIMIT") { console.warn("Order deferred: Rate limit exceeded (cumulative requests)."); } else { console.error("Order failed:", errorDetail); }
+        console.warn(`[EXCHANGE_REJECTION_CLASSIFIED] symbol=${symbol}, classification=${classification}, raw=${errorDetail}`);
+        botState.lastApiError = `${classification}: ${errorDetail}`;
         
-        if (errorDetail.includes("Too many cumulative requests sent")) {
+        if (classification === "API_RATE_LIMIT" && errorDetail.includes("Too many cumulative requests sent")) {
            botState.apiRateLimitUntil = Date.now() + 300000;
            botState.blocker = "API_RATE_LIMIT_EXCEEDED";
            console.warn(`[API_RATE_LIMIT] Blocking execution for 300s due to cumulative rate limit.`);
+           console.warn(`[ORDER_REJECTION_COOLDOWN_APPLIED] symbol=${symbol}, classification=${classification}, cooldownMs=300000`);
         }
       }
       return null;
   }
 
   async cancelOrder(symbol: string, oid: number | string) {
+    if (config.DRY_RUN) {
+      const oidStr = String(oid);
+      botState.activeOrders = (botState.activeOrders || []).filter((order: any) => String(order.oid) !== oidStr);
+      console.log(`[DRY_RUN] Canceled order ${oid} for ${symbol}`);
+      return true;
+    }
+
     const action = {
       type: "cancel",
       cancels: [{
@@ -159,6 +237,12 @@ export class HyperliquidExecutionEngine {
     // Find orders for this coin
     const ordersToCancel = botState.activeOrders.filter(o => o.coin === coin);
     if (ordersToCancel.length === 0) return true;
+
+    if (config.DRY_RUN) {
+      botState.activeOrders = (botState.activeOrders || []).filter((order: any) => order.coin !== coin);
+      console.log(`[DRY_RUN] Canceled ${ordersToCancel.length} open orders for ${coin}`);
+      return true;
+    }
 
     const action = {
       type: "cancel",
@@ -195,6 +279,48 @@ export class HyperliquidExecutionEngine {
         botState.lastApiError = tpValidation.reason;
         return false;
       }
+    }
+
+    if (config.DRY_RUN) {
+      const now = Date.now();
+      const filteredOrders = (botState.activeOrders || []).filter((order: any) => !(order.coin === symbol && order.reduceOnly));
+      const mockOrders: any[] = [];
+      if (tpPrice !== null && tpPrice !== undefined) {
+        mockOrders.push({
+          coin: symbol,
+          oid: `MOCK-TP-${Math.floor(Math.random() * 1000000)}`,
+          reduceOnly: true,
+          sz: Math.abs(sz).toString(),
+          limitPx: tpPrice.toString(),
+          px: tpPrice.toString(),
+          timestamp: now
+        });
+      }
+      mockOrders.push({
+        coin: symbol,
+        oid: `MOCK-SL-${Math.floor(Math.random() * 1000000)}`,
+        reduceOnly: true,
+        isTrigger: true,
+        triggerPx: slPrice.toString(),
+        sz: Math.abs(sz).toString(),
+        timestamp: now
+      });
+      botState.activeOrders = [...filteredOrders, ...mockOrders];
+      botState.telemetry = {
+        ...(botState.telemetry || {}),
+        activeTpCount: tpPrice !== null && tpPrice !== undefined ? 1 : 0,
+        activeSlCount: 1,
+        duplicateProtectionWarnings: botState.telemetry?.duplicateProtectionWarnings || 0,
+        protectionSyncHealth: "HEALTHY",
+        currentProtectionIssue: "NONE",
+        repairRequired: false,
+        repairInProgress: false,
+        lastRepairAction: "DRY_RUN_TP_SL_SYNC",
+        lastRepairCompletedAt: now
+      } as any;
+      console.log(`[DRY_RUN] Placed TP/SL for ${symbol}. TP: ${tpPrice}, SL: ${slPrice}`);
+      console.log(`[PROTECTION_RECONCILIATION_COMPLETED] Protection synced for ${symbol}.`);
+      return true;
     }
 
     const assetId = getAssetId(symbol);

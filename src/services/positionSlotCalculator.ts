@@ -55,7 +55,13 @@ export function calculatePositionSlots(): void {
 
   const configuredMax = botState.config?.maxOpenPositions ?? 3;
   const openSymbols = getOpenPositionSymbols();
-  const openCount = Math.max(openSymbols.size, botState.openPositions || 0);
+  const reportedOpenPositions = botState.openPositions || 0;
+  const openCount = openSymbols.size;
+  if (reportedOpenPositions !== openCount) {
+    console.log(`[GHOST_SLOT_CLEARED] Reported openPositions=${reportedOpenPositions} reconciled to realOpenPositions=${openCount}. Reduce-only orders, failed orders, and stale pending entries do not consume slots.`);
+    console.log(`[POSITION_SLOT_SOURCE_RECONCILED] Slots now count real open positions only.`);
+    botState.openPositions = openCount;
+  }
   const pendingEntries = countPendingEntrySymbols(openSymbols);
   const usedForSlots = openCount + pendingEntries;
   
