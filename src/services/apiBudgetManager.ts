@@ -116,6 +116,7 @@ export class ApiBudgetManager {
         const executionLaneHasRoom = laneEvents < Math.max(1, config.API_EXECUTION_REQUESTS_PER_MIN);
 
         if (isTopExecutionAction && executionLaneHasRoom) {
+            console.log(`[TOP_CANDIDATE_ACTION_RESERVED] Reserved one exchange action for the best execution candidate under REST pressure.`);
             console.log(`[TOP_CMC_CANDIDATE_BUDGET_RESERVED] Reserved degraded-mode exchange action for top execution candidate. lane=${lane}, weight=${weight}, totalWeight=${currentWeight}/${this.REST_WEIGHT_LIMIT}`);
             console.log(`[REST_DEGRADED_TOP_CANDIDATE_ALLOWED] Execution exchange action allowed while background REST is degraded.`);
             console.log(`[API_BUDGET_OVERBLOCK_PREVENTED] Degraded REST pressure converted to candidate-only pacing instead of a global freeze.`);
@@ -131,10 +132,12 @@ export class ApiBudgetManager {
         if (lane === "scanner" && isDegraded) {
              console.warn(`[FULL_UNIVERSE_REST_SCAN_BLOCKED] Scanner REST requests blocked due to budget pressure.`);
              console.warn(`[BACKGROUND_SCAN_DEFERRED_FOR_TRADE_BUDGET] Background scanner REST deferred so exchange/protection budget remains available.`);
+             console.warn(`[BACKGROUND_REQUESTS_DEFERRED_FOR_EXECUTION] Scanner request deferred before consuming top-candidate execution action budget.`);
         }
         if (type === "info" && isDegraded && (lane === "metadata" || lane === "account" || lane === "scanner")) {
              console.warn(`[WSS_FALLBACK_ACTIVE] Falling back to WebSockets for ${lane} state due to REST limits.`);
              console.warn(`[BACKGROUND_SCAN_DEFERRED_FOR_TRADE_BUDGET] Noncritical ${lane} info call deferred during REST pressure.`);
+             console.warn(`[BACKGROUND_REQUESTS_DEFERRED_FOR_EXECUTION] ${lane} request deferred to preserve execution budget.`);
         }
         if (lane === "execution" && type === "exchange") {
              console.warn(`[ORDER_RETRY_SUPPRESSED_BUDGET] Suppressing execution retry loops due to budget limits.`);

@@ -1,7 +1,7 @@
 import { botState, getAssetId, getAssetMeta } from "./state.js";
 import { config } from "./config.js";
 import { hClient } from "./hyperliquidClient.js";
-import { calculatePositionSlots, canOpenNewEntry } from "./services/positionSlotCalculator.js";
+import { calculatePositionSlots, canOpenNewEntry, reconcileEntrySloCapacity } from "./services/positionSlotCalculator.js";
 import { executionValidationGuard } from "./services/executionValidationGuard.js";
 
 export function formatHyperliquidPrice(px: number): string {
@@ -21,7 +21,9 @@ export function formatHyperliquidPrice(px: number): string {
 
 export function classifyExchangeRejection(error: string): string {
   const normalized = (error || "").toLowerCase();
+  if (normalized.includes("entry_blocked_no_available_slo") || normalized.includes("entry_blocked_no_available_slot")) return "INTERNAL_ENTRY_SLO_CAPACITY";
   if (normalized.includes("auth") || normalized.includes("signer") || normalized.includes("private key") || normalized.includes("signature")) return "AUTH_FAILURE";
+  if (normalized.includes("api_budget") || normalized.includes("rest_pressure") || normalized.includes("execution_layer_throttled")) return "API_BUDGET_LIMIT";
   if (normalized.includes("rate limit") || normalized.includes("too many cumulative") || normalized.includes("exceeded") || normalized.includes("volume traded")) return "API_RATE_LIMIT";
   if (normalized.includes("margin") || normalized.includes("insufficient") || normalized.includes("funds")) return "INSUFFICIENT_MARGIN";
   if (normalized.includes("ioc") || normalized.includes("not filled") || normalized.includes("would immediately")) return "IOC_NOT_FILLED";
@@ -52,10 +54,14 @@ export class HyperliquidExecutionEngine {
     // NEW: Add slot check for non-reduce-only orders (entry orders only)
     if (!reduceOnly) {
       if (!canOpenNewEntry(symbol)) {
-        console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
-        console.log(`[ENTRY_BLOCKED] symbol=${symbol}, reason=MAX_OPEN_POSITIONS, openPositions=${botState.usedPositions || botState.openPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || botState.config?.maxOpenPositions || 3}, availableSlots=${botState.availableSlots || 0}`);
-        botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
-        return null;
+        console.log(`[ENTRY_BLOCKED_NO_AVAILABLE_SLO_CLASSIFIED] Internal entry SLO capacity check failed before exchange submission for ${symbol}. Reconciliating against real position state.`);
+        if (!reconcileEntrySloCapacity(symbol)) {
+          console.log(`[POSITION_SLOT_BLOCKED_HARD_SAFETY] Entry order rejected: no available slots or hard safety condition active`);
+          console.log(`[ENTRY_BLOCKED] symbol=${symbol}, reason=MAX_OPEN_POSITIONS, openPositions=${botState.usedPositions || botState.openPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || botState.config?.maxOpenPositions || 3}, availableSlots=${botState.availableSlots || 0}`);
+          botState.lastApiError = "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS";
+          return null;
+        }
+        console.log(`[ENTRY_SLO_FALSE_BLOCK_PREVENTED] ${symbol} entry SLO reconciled successfully; continuing order submission.`);
       }
     } else {
       // Reduce-only orders (TP/SL) bypass slot restrictions

@@ -6,7 +6,7 @@ import { riskManager } from "./hyperliquidRiskManager.js";
 import { validationRunner } from "./hyperliquidValidationRunner.js";
 import { strategy } from "./hyperliquidStrategy.js";
 import { executionEngine } from "./hyperliquidExecutionEngine.js";
-import { calculatePositionSlots } from "./services/positionSlotCalculator.js";
+import { calculatePositionSlots, reconcileEntrySloCapacity } from "./services/positionSlotCalculator.js";
 import { tradeLogger } from "./tradeLogger.js";
 import { snapshotService } from "./services/snapshotService.js";
 import { coinMarketCapTrendScanner } from "./services/coinMarketCapTrendScanner.js";
@@ -5348,6 +5348,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
               console.log(`[FALSE_MAX_POSITION_BLOCK_PREVENTED] usedPosCt (${usedPosCt}) was artificially inflated. Real open positions: ${realOpenCount}. Allowing entry.`);
               botState.analytics.lessons = botState.analytics.lessons || [];
               botState.analytics.lessons.push(`${botState.activeSymbol}: FALSE_SLOT_BLOCK → UNBLOCKED`);
+              botState.usedPositions = realOpenCount;
+              botState.availableSlots = Math.max(0, limit - realOpenCount - (botState.pendingEntryCount || 0));
+              botState.blocker = null;
               if (botState.activeSymbol === "TRX") {
                  console.log(`[TRX_SLOT_BLOCK_REMOVED] Unblocked TRX.`);
               }
@@ -5377,9 +5380,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
             canRotate = true;
             rotationTargetSymbol = weakestPos.coin;
           } else {
+            if ((botState.availableSlots || 0) > 0 || realOpenCount < limit) {
+              console.log(`[FALSE_MAX_POSITION_BLOCK_PREVENTED] MAX_POSITION_BLOCK_CONFIRMED attempted with realOpenPositions=${realOpenCount}, effectiveMaxPositions=${limit}, availableSlots=${botState.availableSlots || 0}.`);
+              console.log(`[POSITION_SLOT_SOURCE_RECONCILED] Reconciled false max-position state before final router block.`);
+              botState.usedPositions = realOpenCount;
+              botState.availableSlots = Math.max(0, limit - realOpenCount - (botState.pendingEntryCount || 0));
+              botState.blocker = null;
+            } else {
             console.log(`[MAX_POSITION_BLOCK_CONFIRMED] Multi-position limit of ${limit} reached (${dynamicLimitObj.reason}). No superior replacements found. New setup score: ${newSetupScore}, Weakest position (${weakestPos ? weakestPos.coin : "N/A"}) score: ${weakestScore.toFixed(1)}.`);
             botState.blocker = "MAX_POSITION_BLOCK_CONFIRMED";
             return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
+            }
           }
           }
         } else {
@@ -6297,25 +6308,65 @@ async function handleTradingLogic(isEmergencyMode = false) {
         if (!order && botState.lastApiError) {
             const err = botState.lastApiError.toLowerCase();
             
-            if (
+            if (err.includes("entry_blocked_no_available_slo") || err.includes("entry_blocked_no_available_slot") || err.includes("internal_entry_slo_capacity")) {
+                console.log(`[ENTRY_BLOCKED_NO_AVAILABLE_SLO_CLASSIFIED] ${botState.activeSymbol} failure classified as internal router SLO/slot inconsistency, not an exchange rejection.`);
+                const slotRecovered = reconcileEntrySloCapacity(botState.activeSymbol);
+                if (slotRecovered) {
+                    console.log(`[ENTRY_SLO_RECONCILED] ${botState.activeSymbol} router SLO reconciled from real open positions and pending entries.`);
+                    console.log(`[ENTRY_SLO_FALSE_BLOCK_PREVENTED] ${botState.activeSymbol} retrying entry after false SLO block.`);
+                    order = await executionEngine.placeOrder(botState.activeSymbol, isBuy, roundedBaseSize, aggressivePx, false, true);
+                    if (order) {
+                        console.log(`[ORDER_SUBMISSION_RECOVERED] ${botState.activeSymbol} order recovered after entry SLO reconciliation.`);
+                        botState.lastApiError = null;
+                        botState.blocker = null;
+                    } else {
+                        botState.blocker = "ENTRY_SLO_RECONCILIATION_FAILED";
+                        console.log(`[ORDER_REJECTION_COOLDOWN_APPLIED] ${botState.activeSymbol} SLO reconciliation failed; applying symbol-specific retry delay only.`);
+                        botState.routerBlockCooldowns = botState.routerBlockCooldowns || {};
+                        botState.routerBlockCooldowns[botState.activeSymbol] = Date.now() + 15000;
+                    }
+                } else {
+                    botState.blocker = "ENTRY_SLO_HARD_CAPACITY_BLOCK";
+                    console.log(`[ENTRY_BLOCKED] symbol=${botState.activeSymbol}, reason=MAX_OPEN_POSITIONS, raw=ENTRY_SLO_HARD_CAPACITY_BLOCK`);
+                }
+            } else if (
               err.includes("rate limit") || 
               err.includes("rate_limit") || 
               err.includes("too many cumulative") || 
               err.includes("backoff") || 
+              err.includes("api_budget") ||
+              err.includes("rest_pressure") ||
+              err.includes("execution_layer_throttled") ||
               err.includes("exceeded") ||
               err.includes("volume traded")
             ) {
-                console.log("[BUDGET_ENFORCER] Entry deferred for API budget recharge.");
-                console.log("[ORDER_RETRY_SUPPRESSED_API_BUDGET] Suppressing automatic retry due to active budget constraint.");
-                botState.executionThrottleUntil = Date.now() + 30000; // 30s throttle
-                botState.blocker = "API_RATE_LIMIT_EXCEEDED";
-                botState.analytics.lessons = botState.analytics.lessons || [];
-                
-                const existingLesson = botState.analytics.lessons.find((l: string) => l.includes(`${botState.activeSymbol}: API_BUDGET_LIMIT`));
-                if (existingLesson) {
-                    console.log(`[API_BUDGET_COOLDOWN_ALREADY_ACTIVE] ${botState.activeSymbol} already recorded API limit lesson.`);
+                const actualExchangeRateLimit = err.includes("rate limit") || err.includes("too many cumulative") || err.includes("volume traded");
+                const currentOppForBudget = botState.scannerOpportunities?.find(o => o.symbol === botState.activeSymbol) as any;
+                const isTopCandidateForBudget = (currentOppForBudget?.executionPriorityRank || 999) <= Math.max(1, Math.min(3, botState.availableSlots || 1)) || (currentOppForBudget?.finalExecutionScore || 0) >= 70;
+                if (!actualExchangeRateLimit && isTopCandidateForBudget && (botState.availableSlots || 0) > 0) {
+                    console.log(`[TOP_CANDIDATE_ACTION_RESERVED] ${botState.activeSymbol} retrying once using reserved top-candidate exchange action.`);
+                    console.log(`[REST_DEGRADED_TOP_CANDIDATE_ALLOWED] ${botState.activeSymbol} API budget soft block bypassed for single best candidate.`);
+                    console.log(`[API_BUDGET_OVERBLOCK_PREVENTED] ${botState.activeSymbol} API budget did not become a global execution freeze.`);
+                    botState.executionThrottleUntil = 0;
+                    order = await executionEngine.placeOrder(botState.activeSymbol, isBuy, roundedBaseSize, aggressivePx, false, true);
+                    if (order) {
+                        console.log(`[ORDER_SUBMISSION_RECOVERED] ${botState.activeSymbol} order recovered after API budget overblock prevention.`);
+                        botState.lastApiError = null;
+                        botState.blocker = null;
+                    }
                 } else {
-                    botState.analytics.lessons.push(`${botState.activeSymbol}: API_BUDGET_LIMIT → RETRY_DELAY_30S`);
+                    console.log("[BUDGET_ENFORCER] Entry deferred for API budget recharge.");
+                    console.log("[ORDER_RETRY_SUPPRESSED_API_BUDGET] Suppressing automatic retry due to active budget constraint.");
+                    botState.executionThrottleUntil = Date.now() + 30000; // 30s throttle
+                    botState.blocker = actualExchangeRateLimit ? "API_RATE_LIMIT_EXCEEDED" : "API_BUDGET_LIMIT";
+                    botState.analytics.lessons = botState.analytics.lessons || [];
+
+                    const existingLesson = botState.analytics.lessons.find((l: string) => l.includes(`${botState.activeSymbol}: API_BUDGET_LIMIT`));
+                    if (existingLesson) {
+                        console.log(`[API_BUDGET_COOLDOWN_ALREADY_ACTIVE] ${botState.activeSymbol} already recorded API limit lesson.`);
+                    } else {
+                        botState.analytics.lessons.push(`${botState.activeSymbol}: API_BUDGET_LIMIT → RETRY_DELAY_30S`);
+                    }
                 }
             } else {
                 console.log(`[EXECUTION_RECOVERY_ATTEMPT] Order failed: ${botState.lastApiError}`);

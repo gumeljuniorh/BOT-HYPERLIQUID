@@ -34,6 +34,18 @@ function countPendingEntrySymbols(openSymbols: Set<string>): number {
   return pendingSymbols.size;
 }
 
+function clearStalePendingEntryOrders(openSymbols: Set<string>): number {
+  const now = Date.now();
+  const before = (botState.activeOrders || []).length;
+  botState.activeOrders = (botState.activeOrders || []).filter((order: any) => {
+    if (!order || order.reduceOnly || !order.coin || openSymbols.has(order.coin)) return true;
+    const ts = order.timestamp || order.time || 0;
+    if (!ts || now - ts > 15000) return false;
+    return true;
+  });
+  return before - (botState.activeOrders || []).length;
+}
+
 function logPositionSlotState(openPositions: number, pendingEntries: number, configuredMax: number, effectiveMax: number, availableSlots: number, reason: string): void {
   const payload = `openPositions=${openPositions}, pendingEntries=${pendingEntries}, maxOpenPositions=${configuredMax}, effectiveMaxPositions=${effectiveMax}, availableSlots=${availableSlots}, reason=${reason}`;
   const now = Date.now();
@@ -55,6 +67,11 @@ export function calculatePositionSlots(): void {
 
   const configuredMax = botState.config?.maxOpenPositions ?? 3;
   const openSymbols = getOpenPositionSymbols();
+  const stalePendingCleared = clearStalePendingEntryOrders(openSymbols);
+  if (stalePendingCleared > 0) {
+    console.log(`[FAILED_ORDER_SLOT_RELEASED] Cleared ${stalePendingCleared} stale non-reduce-only pending entry reservation(s).`);
+    console.log(`[GHOST_SLOT_CLEARED] Stale entry attempts no longer consume position capacity.`);
+  }
   const reportedOpenPositions = botState.openPositions || 0;
   const openCount = openSymbols.size;
   if (reportedOpenPositions !== openCount) {
@@ -131,6 +148,12 @@ export function calculatePositionSlots(): void {
   botState.availableSlots = Math.max(0, effectiveMax - usedForSlots);
   botState.slotReductionReason = reason;
   botState.slotReductionIsHardSafety = isHardSafety;
+
+  if ((botState.blocker === "MAX_POSITION_BLOCK_CONFIRMED" || botState.blocker === "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS") && botState.availableSlots > 0 && !isHardSafety) {
+    console.log(`[FALSE_MAX_POSITION_BLOCK_PREVENTED] Cleared stale ${botState.blocker} because realOpenPositions=${openCount}, pendingEntries=${pendingEntries}, availableSlots=${botState.availableSlots}.`);
+    botState.blocker = null;
+  }
+
   logPositionSlotState(openCount, pendingEntries, configuredMax, effectiveMax, botState.availableSlots, reason);
 
   if (isHardSafety && effectiveMax < configuredMax) {
@@ -151,9 +174,38 @@ export function calculatePositionSlots(): void {
   }
 }
 
-export function canOpenNewEntry(symbol?: string): boolean {
+export function reconcileEntrySloCapacity(symbol?: string): boolean {
   calculatePositionSlots();
-  const allowed = (botState.availableSlots || 0) > 0;
+  const realOpenPositions = botState.usedPositions || 0;
+  const pendingEntries = botState.pendingEntryCount || 0;
+  const effectiveMax = botState.effectiveMaxPositions ?? botState.configuredMaxPositions ?? 3;
+  const availableSlots = botState.availableSlots || 0;
+  const hardSafety = botState.slotReductionIsHardSafety === true;
+
+  console.log(`[POSITION_SLOT_SOURCE_RECONCILED] symbol=${symbol || botState.activeSymbol || "UNKNOWN"}, realOpenPositions=${realOpenPositions}, pendingEntries=${pendingEntries}, effectiveMaxPositions=${effectiveMax}, availableSlots=${availableSlots}, hardSafety=${hardSafety}`);
+
+  if (availableSlots > 0 && !hardSafety) {
+    console.log(`[ENTRY_SLO_AVAILABLE_CONFIRMED] symbol=${symbol || botState.activeSymbol || "UNKNOWN"}, availableSlots=${availableSlots}`);
+    return true;
+  }
+
+  if (!hardSafety && realOpenPositions + pendingEntries < effectiveMax) {
+    botState.availableSlots = Math.max(0, effectiveMax - realOpenPositions - pendingEntries);
+    console.log(`[ENTRY_SLO_RECONCILED] Rebuilt entry SLO capacity from real exchange position count.`);
+    console.log(`[ENTRY_SLO_FALSE_BLOCK_PREVENTED] symbol=${symbol || botState.activeSymbol || "UNKNOWN"}, availableSlots=${botState.availableSlots}`);
+    if (botState.availableSlots > 0) {
+      if (botState.blocker === "MAX_POSITION_BLOCK_CONFIRMED" || botState.blocker === "ENTRY_BLOCKED_NO_AVAILABLE_SLOTS") {
+        botState.blocker = null;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function canOpenNewEntry(symbol?: string): boolean {
+  const allowed = reconcileEntrySloCapacity(symbol);
   if (!allowed) {
     console.log(`[ENTRY_BLOCKED] symbol=${symbol || botState.activeSymbol || "UNKNOWN"}, reason=MAX_OPEN_POSITIONS, openPositions=${botState.usedPositions || 0}, pendingEntries=${botState.pendingEntryCount || 0}, maxOpenPositions=${botState.configuredMaxPositions || 3}, availableSlots=${botState.availableSlots || 0}, slotReductionReason=${botState.slotReductionReason || "NONE"}`);
   } else {
