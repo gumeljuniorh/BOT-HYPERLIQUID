@@ -279,6 +279,104 @@ function applySoftExecutionAdjustment(opp: any, reason: string, sizeMultiplier =
   console.log(`[SOFT_RISK_REDUCED_SIZE_NOT_LEVERAGE] ${opp.symbol || botState.activeSymbol} soft risk was absorbed into size/ranking so unified leverage remains authoritative.`);
 }
 
+function getAddressPacingRetryAfterMs(): number {
+  const stateWait = botState.addressActionPacingUntil
+    ? Math.max(0, botState.addressActionPacingUntil - Date.now())
+    : 0;
+  return Math.max(stateWait, apiBudgetManager.getAddressActionRetryAfterMs());
+}
+
+function isAddressPacingGlobalActive(): boolean {
+  return apiBudgetManager.isAddressLimitRecoveryActive() || getAddressPacingRetryAfterMs() > 0;
+}
+
+function syncAddressPacingState(opportunities: any[] = []): void {
+  const now = Date.now();
+  const active = isAddressPacingGlobalActive();
+  const retryAfterMs = active ? getAddressPacingRetryAfterMs() : 0;
+  const nextActionAllowedAt = active
+    ? Math.max(
+        botState.addressActionPacingUntil || 0,
+        apiBudgetManager.getAddressActionNextAllowedAt(),
+        retryAfterMs > 0 ? now + retryAfterMs : now
+      )
+    : 0;
+
+  if (!active) {
+    if (botState.addressPacing?.active) {
+      botState.addressPacing = {
+        active: false,
+        status: "INACTIVE",
+        reason: "NONE",
+        nextActionAllowedAt: 0,
+        retryAfterMs: 0,
+        queuedCandidates: [],
+        reservedCandidate: null,
+        lastActionSentAt: apiBudgetManager.getLastAddressActionAt(),
+        laneStatus: "READY",
+        updatedAt: now
+      };
+    }
+    return;
+  }
+
+  const queueable = [...opportunities]
+    .filter((opp) => {
+      const side = opp.selectedSide || opp.directionalBias || opp.bias || opp.direction || "NONE";
+      const hasSide = side === "LONG" || side === "SHORT";
+      const isTradableState = opp.eligibility === "ELIGIBLE" || opp.eligibility === "NEAR_ENTRY";
+      return isTradableState && hasSide && !isHardExecutionBlocker(opp.rejectionReason);
+    })
+    .sort((a, b) => {
+      const scoreA = a.finalExecutionScore || a.finalScore || a.confidence || 0;
+      const scoreB = b.finalExecutionScore || b.finalScore || b.confidence || 0;
+      return scoreB - scoreA;
+    })
+    .slice(0, 3);
+
+  const queuedCandidates = queueable.map((opp, index) => {
+    const side = opp.selectedSide || opp.directionalBias || opp.bias || opp.direction || "NONE";
+    opp.addressPacingQueuedRank = index + 1;
+    opp.addressPacingStatus = retryAfterMs > 0 ? "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT" : "READY";
+    if (opp.rejectionReason === "ADDRESS_ACTION_PACING_ACTIVE" || opp.rejectionReason === "ADDRESS_ACTION_PACING_REQUIRED") {
+      opp.rejectionReason = null;
+    }
+    return {
+      symbol: opp.symbol,
+      side,
+      finalExecutionScore: Math.round(opp.finalExecutionScore || opp.finalScore || opp.confidence || 0),
+      leverage: opp.leverageTier || opp.leverageSelected || opp.unifiedDecision?.leverageTier || null,
+      size: opp.actualEntrySize || opp.preferredEntrySize || botState.actualEntrySize || botState.preferredEntrySize || null,
+      rank: index + 1
+    };
+  });
+
+  botState.addressPacing = {
+    active: true,
+    status: "ACTIVE",
+    reason: "one action per 10 seconds",
+    nextActionAllowedAt,
+    retryAfterMs,
+    queuedCandidates,
+    reservedCandidate: queuedCandidates[0] || null,
+    lastActionSentAt: apiBudgetManager.getLastAddressActionAt(),
+    laneStatus: retryAfterMs > 0 ? "WAITING" : "READY",
+    updatedAt: now
+  };
+
+  const lastLogAt = (botState as any).lastAddressPacingGlobalLogAt || 0;
+  if (now - lastLogAt > 5000) {
+    console.log(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Status=${botState.addressPacing.laneStatus}, nextAllowedIn=${Math.ceil(retryAfterMs / 1000)}s, queued=${queuedCandidates.length}.`);
+    console.log(`[ADDRESS_PACING_SYMBOL_SPAM_SUPPRESSED] Address pacing is shown as one global lane state instead of per-symbol rejection rows.`);
+    if (queuedCandidates[0]) {
+      console.log(`[TOP_CANDIDATE_QUEUED_FOR_ADDRESS_ACTION] ${queuedCandidates[0].symbol} ${queuedCandidates[0].side} score=${queuedCandidates[0].finalExecutionScore}.`);
+      console.log(`[NEXT_ACTION_SLOT_RESERVED] Reserved next address action for ${queuedCandidates[0].symbol}.`);
+      console.log(`[ADDRESS_PACING_TOP_CANDIDATE_QUEUED] ${queuedCandidates[0].symbol} waits for the next 10s exchange action lane.`);
+    }
+    (botState as any).lastAddressPacingGlobalLogAt = now;
+  }
+}
+
 export async function programmaticClosePosition(sym: string, reason: string): Promise<boolean> {
   const pos = botState.allPositions?.find(p => p.coin === sym);
   if (!pos) return false;
@@ -3092,6 +3190,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
     }
   });
 
+  syncAddressPacingState(opportunities);
   botState.scannerOpportunities = opportunities;
   botState.lastScanTime = Date.now();
   botState.scansSinceLastEntry = (botState.scansSinceLastEntry || 0) + 1;
@@ -3324,13 +3423,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
           }
       }
 
-      if (botState.addressActionPacingUntil && Date.now() < botState.addressActionPacingUntil) {
-          const waitSeconds = Math.ceil((botState.addressActionPacingUntil - Date.now()) / 1000);
-          console.log(`[ADDRESS_ACTION_PACING_ACTIVE] ${sym} held for ${waitSeconds}s to respect Hyperliquid one-action-per-address pacing.`);
-          console.log(`[EXECUTION_VALIDATION_DEBOUNCED] ${sym} remains prepared; retry will occur after address pacing clears.`);
-          opp.eligibility = "NEAR_ENTRY";
-          opp.rejectionReason = "ADDRESS_ACTION_PACING_ACTIVE";
-          applySoftExecutionAdjustment(opp, "ADDRESS_ACTION_PACING_ACTIVE", 0.9, 1);
+      if (isAddressPacingGlobalActive() && getAddressPacingRetryAfterMs() > 0) {
+          opp.addressPacingStatus = "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT";
+          if (execRank <= 3) {
+            console.log(`[ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT] ${sym} remains ranked for execution; global address lane controls timing.`);
+          }
           return;
       }
 
@@ -4321,8 +4418,24 @@ async function handleTradingLogic(isEmergencyMode = false) {
          const scoreB = b.finalExecutionScore || b.finalScore || b.confidence || 0;
          return scoreB - scoreA;
       });
-      // Take up to available slots
-      candidatesToExecute = candidates.slice(0, availableSlots);
+      syncAddressPacingState(candidates);
+      const addressPacingWaitMs = getAddressPacingRetryAfterMs();
+      if (isAddressPacingGlobalActive() && addressPacingWaitMs > 0) {
+        candidatesToExecute = [];
+        if (candidates[0]) {
+          console.log(`[ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT] ${candidates[0].symbol} is queued as top candidate; next exchange action in ${Math.ceil(addressPacingWaitMs / 1000)}s.`);
+          console.log(`[TOP_CANDIDATE_QUEUED_FOR_ADDRESS_ACTION] ${candidates[0].symbol} score=${candidates[0].finalExecutionScore || candidates[0].finalScore || candidates[0].confidence || 0}.`);
+          console.log(`[NEXT_ACTION_SLOT_RESERVED] Reserved upcoming address action for ${candidates[0].symbol}; background/lower-priority entries deferred.`);
+        }
+      } else if (isAddressPacingGlobalActive()) {
+        candidatesToExecute = candidates.slice(0, Math.min(1, availableSlots));
+        if (candidatesToExecute[0]) {
+          console.log(`[ADDRESS_PACING_NEXT_ACTION_READY] Sending only top queued exchange mutation candidate=${candidatesToExecute[0].symbol}.`);
+        }
+      } else {
+        // Take up to available slots
+        candidatesToExecute = candidates.slice(0, availableSlots);
+      }
       console.log(`[MULTI_POSITION_PLAN] availableSlots=${availableSlots}, selectedCandidates=${candidatesToExecute.length}, symbols=${candidatesToExecute.map(c => c.symbol).join(", ")}`);
     } else {
       // Single-position mode fallback
@@ -6487,15 +6600,16 @@ async function handleTradingLogic(isEmergencyMode = false) {
         // Apply updated progressive leverage bounds for safety.
         const leverageUpdated = await executionEngine.setLeverage(botState.activeSymbol, setupLeverage);
         const addressPacingWaitMs = apiBudgetManager.getAddressActionRetryAfterMs();
-        if (!leverageUpdated && botState.lastApiError?.toLowerCase().includes("address_action_pacing_required")) {
+        if (!leverageUpdated && (botState.lastApiError?.toLowerCase().includes("address_action_pacing_required") || botState.lastApiError?.toLowerCase().includes("address_action_waiting_for_next_slot"))) {
           const waitMs = Math.max(1000, addressPacingWaitMs || 10000);
           botState.executionThrottleUntil = Date.now() + waitMs;
           botState.addressActionPacingUntil = Date.now() + waitMs;
           botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
-          console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} leverage update was deferred by address action pacing.`);
+          syncAddressPacingState(botState.scannerOpportunities || []);
+          console.log(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Leverage update deferred by global address action pacing.`);
           console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} entry deferred before submission; this is retryable, not unrecoverable.`);
           console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
-          return botState.blocker;
+          return "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT";
         }
 
         if (!config.DRY_RUN && apiBudgetManager.isAddressLimitRecoveryActive() && addressPacingWaitMs > 0) {
@@ -6503,10 +6617,11 @@ async function handleTradingLogic(isEmergencyMode = false) {
           botState.addressActionPacingUntil = Date.now() + addressPacingWaitMs;
           botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
           botState.lastApiError = `ADDRESS_ACTION_PACING_REQUIRED: leverage update consumed address action slot`;
-          console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} leverage update succeeded; waiting before entry to respect one exchange action per 10s.`);
+          syncAddressPacingState(botState.scannerOpportunities || []);
+          console.log(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Leverage update used the address action slot; entry is queued for the next lane opening.`);
           console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} entry deferred before order submit so it is not misclassified as exchange rejection.`);
           console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(addressPacingWaitMs / 1000)}s.`);
-          return botState.blocker;
+          return "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT";
         }
 
         // REAL_ENTRY_REQUIRED: Submitting highly executable aggressive Limit order (1.0% buffer through the best bid/ask)
@@ -6551,12 +6666,13 @@ async function handleTradingLogic(isEmergencyMode = false) {
                     botState.blocker = "ENTRY_SLO_HARD_CAPACITY_BLOCK";
                     console.log(`[ENTRY_BLOCKED] symbol=${botState.activeSymbol}, reason=MAX_OPEN_POSITIONS, raw=ENTRY_SLO_HARD_CAPACITY_BLOCK`);
                 }
-            } else if (err.includes("address_action_pacing_required") || err.includes("address_limit_one_action_per_10s") || err.includes("one_action_per_10s")) {
+            } else if (err.includes("address_action_pacing_required") || err.includes("address_action_waiting_for_next_slot") || err.includes("address_limit_one_action_per_10s") || err.includes("one_action_per_10s")) {
                 const waitMs = Math.max(1000, apiBudgetManager.getAddressActionRetryAfterMs() || 10000);
                 botState.executionThrottleUntil = Date.now() + waitMs;
                 botState.addressActionPacingUntil = Date.now() + waitMs;
                 botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
-                console.log(`[ADDRESS_ACTION_PACING_DETECTED] ${botState.activeSymbol} order failure is address action pacing, not exchange rejection.`);
+                syncAddressPacingState(botState.scannerOpportunities || []);
+                console.log(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Order failure is global address action pacing, not exchange rejection.`);
                 console.log(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${botState.activeSymbol} deferred without self-repair retry to avoid spending the next action slot.`);
                 console.log(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${botState.activeSymbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
             } else if (
@@ -6823,7 +6939,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
             "INSUFFICIENT_MARGIN_NOT_RECOVERABLE",
             "INVALID_ORDER_SIZE_RECOVERY_FAILED",
             "INVALID_PRICE_RECOVERY_FAILED",
-            "ADDRESS_ACTION_PACING_ACTIVE"
+            "ADDRESS_ACTION_PACING_ACTIVE",
+            "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT"
           ];
           
           let effectiveBlocker = botState.blocker || "";
@@ -6910,7 +7027,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
 * final decision: ${_traceBlocker}`);
 
       if (_traceBlocker !== "ORDER_SUBMITTED_SUCCESSFULLY" && _traceBlocker !== "PASSED") {
-         botState.blocker = _traceBlocker;
+         botState.blocker = _traceBlocker === "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT"
+           ? "ADDRESS_ACTION_PACING_ACTIVE"
+           : _traceBlocker;
          if (botState.autoRecoveryMode === "ON") {
            console.log(`[AUTO_RECOVERY_ENTRY_BLOCKED] Trade execution blocked during autonomous recovery due to: ${_traceBlocker}`);
          }
@@ -8199,6 +8318,7 @@ async function loop() {
     if (botState.lastApiError?.includes("ADDRESS_ACTION_PACING_REQUIRED")) {
       botState.lastApiError = null;
     }
+    syncAddressPacingState(botState.scannerOpportunities || []);
   }
   
   // Resolve Trading Mode (Single Source of Truth)

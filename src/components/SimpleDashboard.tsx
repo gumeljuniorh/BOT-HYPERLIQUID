@@ -47,6 +47,12 @@ function formatPrice(px: number | string | null | undefined): string {
   return num.toFixed(6);
 }
 
+function formatCountdown(ms: number | null | undefined): string {
+  const safeMs = Math.max(0, Number(ms || 0));
+  if (safeMs <= 0) return "ready";
+  return `${Math.ceil(safeMs / 1000)}s`;
+}
+
 // Map system status blocker nicely
 const getCleanSystemStatus = (blocker: string | null, activePhase: string | null, isCritical: boolean) => {
   if (isCritical) {
@@ -868,12 +874,52 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
                  </div>
              </div>
              
-             {bot.apiBudget?.addressLimitRecoveryActive && (
-               <div className="p-2 border border-rose-500/20 bg-rose-500/5 rounded mb-3">
-                 <div className="text-rose-400 text-[10px] font-bold uppercase flex items-center justify-between font-mono">
-                    <span>Address Limit Recovery</span>
-                    <span className="animate-pulse">ACTIVE 1/10s</span>
+             {(bot.apiBudget?.addressLimitRecoveryActive || bot.addressPacing?.active) && (
+               <div className="p-2 border border-amber-500/25 bg-amber-500/5 rounded mb-3">
+                 <div className="text-amber-300 text-[10px] font-bold uppercase flex items-center justify-between font-mono mb-2">
+                    <span>Hyperliquid Address Pacing</span>
+                    <span className={cn("px-1.5 py-0.5 rounded", bot.addressPacing?.laneStatus === "READY" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300")}>
+                      {bot.addressPacing?.laneStatus || bot.apiBudget?.addressActionLaneStatus || "WAITING"}
+                    </span>
                  </div>
+                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono">
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Status:</span>
+                     <span className="text-slate-200">{bot.addressPacing?.status || "ACTIVE"}</span>
+                   </div>
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Next Action:</span>
+                     <span className="text-slate-200">{formatCountdown(bot.addressPacing?.retryAfterMs ?? bot.apiBudget?.addressActionRetryAfterMs)}</span>
+                   </div>
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Reserved:</span>
+                     <span className="text-slate-200">{bot.addressPacing?.reservedCandidate?.symbol || "NONE"}</span>
+                   </div>
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Score:</span>
+                     <span className="text-slate-200">{bot.addressPacing?.reservedCandidate?.finalExecutionScore ?? "—"}</span>
+                   </div>
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Side:</span>
+                     <span className="text-slate-200">{bot.addressPacing?.reservedCandidate?.side || "—"}</span>
+                   </div>
+                   <div className="flex justify-between gap-2">
+                     <span className="text-slate-500">Lev / Size:</span>
+                     <span className="text-slate-200">
+                       {bot.addressPacing?.reservedCandidate?.leverage ? `${bot.addressPacing.reservedCandidate.leverage}x` : "—"}
+                       {bot.addressPacing?.reservedCandidate?.size ? ` / $${Number(bot.addressPacing.reservedCandidate.size).toFixed(0)}` : ""}
+                     </span>
+                   </div>
+                 </div>
+                 {bot.addressPacing?.queuedCandidates?.length > 0 && (
+                   <div className="mt-2 flex flex-wrap gap-1">
+                     {bot.addressPacing.queuedCandidates.slice(0, 3).map((candidate: any) => (
+                       <span key={`${candidate.rank}-${candidate.symbol}`} className="px-1.5 py-0.5 rounded bg-slate-800/70 border border-slate-700/50 text-[8px] text-slate-300 font-mono">
+                         #{candidate.rank} {candidate.symbol} {candidate.side} {candidate.finalExecutionScore}
+                       </span>
+                     ))}
+                   </div>
+                 )}
                </div>
              )}
 

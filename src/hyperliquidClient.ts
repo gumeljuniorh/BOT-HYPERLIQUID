@@ -163,7 +163,24 @@ export class HyperliquidClient {
     botState.apiBudget = apiBudgetManager.getSnapshot();
     if (!budget.allowed) {
       console.warn(`[EXECUTION_BUDGET_EXCEEDED] Exchange request suppressed. lane=${lane}, action=${action?.type || "unknown"}, reason=${budget.reason}`);
-      if (lane === "execution") botState.blocker = "EXECUTION_LAYER_THROTTLED";
+      if (budget.reason === "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT") {
+        botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
+        botState.addressActionPacingUntil = Date.now() + budget.retryAfterMs;
+        botState.addressPacing = {
+          active: true,
+          status: "ACTIVE",
+          reason: "one action per 10 seconds",
+          nextActionAllowedAt: botState.addressActionPacingUntil,
+          retryAfterMs: budget.retryAfterMs,
+          queuedCandidates: botState.addressPacing?.queuedCandidates || [],
+          reservedCandidate: botState.addressPacing?.reservedCandidate || null,
+          lastActionSentAt: apiBudgetManager.getLastAddressActionAt(),
+          laneStatus: "WAITING",
+          updatedAt: Date.now()
+        };
+      } else if (lane === "execution") {
+        botState.blocker = "EXECUTION_LAYER_THROTTLED";
+      }
       return {
         status: "error",
         response: budget.reason,
