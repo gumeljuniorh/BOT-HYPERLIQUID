@@ -97,18 +97,6 @@ export const botState: BotState = {
     blockedRequests: 0,
     lastUpdated: Date.now()
   },
-  addressPacing: {
-    active: false,
-    status: "INACTIVE",
-    reason: "NONE",
-    nextActionAllowedAt: 0,
-    retryAfterMs: 0,
-    queuedCandidates: [],
-    reservedCandidate: null,
-    lastActionSentAt: 0,
-    laneStatus: "READY",
-    updatedAt: Date.now()
-  },
   protection: {
     tpPrice: null,
     slPrice: null,

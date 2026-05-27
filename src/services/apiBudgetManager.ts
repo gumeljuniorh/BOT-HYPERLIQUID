@@ -19,11 +19,6 @@ export interface ApiBudgetSnapshot {
   exchangeActionsInWindow: number;
   exchangeActionsLimit: number; // dynamically estimated or fixed buffer
   addressLimitRecoveryActive: boolean;
-  addressActionRetryAfterMs: number;
-  nextAddressActionAllowedAt: number;
-  lastAddressActionAt: number;
-  addressActionLaneStatus: "WAITING" | "READY";
-  addressActionReason: string;
   wsConnections: number;
   wsSubscriptions: number;
   executionRequestsPerMin: number;
@@ -59,8 +54,6 @@ export class ApiBudgetManager {
   // Address limit
   private addressLimitRecoveryActive = false;
   private lastAddressActionTime = 0;
-  private lastAddressPacingLogTime = 0;
-  private lastAddressSpamSuppressedLogTime = 0;
   
   // Limits
   private readonly REST_WEIGHT_LIMIT = 1200;
@@ -86,7 +79,7 @@ export class ApiBudgetManager {
     const now = Date.now();
     this.prune(now);
 
-    if (now < this.hardRateLimitUntil) {
+    if (now < this.hardRateLimitUntil && !isCritical) {
       this.blockedRequests++;
       const retryAfterMs = this.hardRateLimitUntil - now;
       this.lastThrottleReason = "EXCHANGE_RATE_LIMIT_BACKOFF";
@@ -94,24 +87,14 @@ export class ApiBudgetManager {
     }
     
     if (this.addressLimitRecoveryActive && type === "exchange") {
-        const retryAfterMs = this.getAddressActionRetryAfterMs();
-        if (retryAfterMs > 0) {
+        if (now - this.lastAddressActionTime < 10000) {
             if (isCritical) {
                 console.warn(`[ADDRESS_LIMIT_CRITICAL_PROTECTION_ALLOWED] Allowing critical ${lane} exchange action despite address pacing window.`);
             } else {
                 this.blockedRequests++;
-                this.lastThrottleReason = "ADDRESS_ACTION_PACING_ACTIVE";
-                this.logAddressPacingActive(now, retryAfterMs);
-                if (now - this.lastAddressSpamSuppressedLogTime > 5000) {
-                    console.warn(`[ADDRESS_PACING_SYMBOL_SPAM_SUPPRESSED] Suppressed per-symbol rejection spam; ${lane} exchange mutation is queued behind the global address lane.`);
-                    this.lastAddressSpamSuppressedLogTime = now;
-                }
-                console.warn(`[ADDRESS_LIMIT_ONE_ACTION_PER_10S] Exchange mutation deferred for ${lane}; next action allowed in ${Math.ceil(retryAfterMs / 1000)}s.`);
-                return this.decision(false, lane, "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT", retryAfterMs);
+                console.warn(`[ADDRESS_LIMIT_ONE_ACTION_PER_10S] Blocked action for ${lane}, must wait 10s between actions.`);
+                return this.decision(false, lane, "ADDRESS_LIMIT_ONE_ACTION_PER_10S", 10000 - (now - this.lastAddressActionTime));
             }
-        } else if (now - this.lastAddressPacingLogTime > 2000) {
-            console.log(`[ADDRESS_PACING_NEXT_ACTION_READY] Global address action lane is ready for one exchange mutation.`);
-            this.lastAddressPacingLogTime = now;
         }
     }
 
@@ -129,7 +112,7 @@ export class ApiBudgetManager {
     let isAllowed = true;
     let reason = "OK";
     
-    if (currentWeight + weight >= this.REST_WEIGHT_LIMIT) {
+    if (currentWeight + weight >= this.REST_WEIGHT_LIMIT && !isCritical) {
         isAllowed = false;
         reason = "REST_WEIGHT_BUDGET_EXCEEDED";
     } else if (isDegraded && !isCritical) {
@@ -181,9 +164,6 @@ export class ApiBudgetManager {
     if (type === "exchange") {
         this.lastAddressActionTime = now;
         this.exchangeActionBudget--;
-        if (this.addressLimitRecoveryActive) {
-            console.log(`[ADDRESS_PACING_ACTION_SENT] lane=${lane}, endpoint=${endpoint}, nextAllowedAt=${new Date(this.lastAddressActionTime + 10000).toISOString()}`);
-        }
     }
     
     // Minimal log so we aren't totally blind, but avoiding spam.
@@ -213,7 +193,6 @@ export class ApiBudgetManager {
       if (!this.addressLimitRecoveryActive) {
           this.addressLimitRecoveryActive = true;
           console.warn(`[ADDRESS_LIMIT_RECOVERY_ACTIVE] Entering strict 1 exchange action per 10s mode.`);
-          console.warn(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Hyperliquid address pacing active; exchange mutations will use one global 10s action lane.`);
       }
   }
 
@@ -227,19 +206,12 @@ export class ApiBudgetManager {
   }
 
   getAddressActionNextAllowedAt(): number {
-      if (!this.addressLimitRecoveryActive) return 0;
-      if (!this.lastAddressActionTime) return Date.now();
-      return this.lastAddressActionTime + 10000;
+      const waitMs = this.getAddressActionRetryAfterMs();
+      return waitMs > 0 ? Date.now() + waitMs : 0;
   }
 
   getLastAddressActionAt(): number {
       return this.lastAddressActionTime;
-  }
-
-  private logAddressPacingActive(now: number, retryAfterMs: number) {
-      if (now - this.lastAddressPacingLogTime < 5000) return;
-      console.warn(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Address action lane waiting ${Math.ceil(retryAfterMs / 1000)}s before next exchange mutation.`);
-      this.lastAddressPacingLogTime = now;
   }
 
   noteCacheHit(lane: ApiBudgetLane, endpoint: string) {
@@ -255,7 +227,6 @@ export class ApiBudgetManager {
     this.prune(now);
     const currentWeight = this.events.reduce((sum, e) => sum + e.weight, 0);
     const degradedMode = currentWeight >= this.SAFE_REST_WEIGHT_TARGET || now < this.hardRateLimitUntil || this.addressLimitRecoveryActive;
-    const addressActionRetryAfterMs = this.getAddressActionRetryAfterMs();
     
     return {
       enabled: config.API_BUDGET_ENABLED,
@@ -266,11 +237,6 @@ export class ApiBudgetManager {
       exchangeActionsInWindow: this.events.filter(e => e.type === "exchange").length,
       exchangeActionsLimit: this.exchangeActionBudget,
       addressLimitRecoveryActive: this.addressLimitRecoveryActive,
-      addressActionRetryAfterMs,
-      nextAddressActionAllowedAt: this.getAddressActionNextAllowedAt(),
-      lastAddressActionAt: this.lastAddressActionTime,
-      addressActionLaneStatus: this.addressLimitRecoveryActive && addressActionRetryAfterMs > 0 ? "WAITING" : "READY",
-      addressActionReason: this.addressLimitRecoveryActive ? "one action per 10 seconds" : "NONE",
       wsConnections: this.wsConnections,
       wsSubscriptions: this.wsSubscriptions,
       executionRequestsPerMin: this.countLane("execution"),

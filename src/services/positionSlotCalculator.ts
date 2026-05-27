@@ -70,18 +70,20 @@ export function calculatePositionSlots(): void {
   const stalePendingCleared = clearStalePendingEntryOrders(openSymbols);
   if (stalePendingCleared > 0) {
     console.log(`[FAILED_ORDER_SLOT_RELEASED] Cleared ${stalePendingCleared} stale non-reduce-only pending entry reservation(s).`);
-    console.log(`[GHOST_SLOT_CLEARED] Stale entry attempts no longer consume position capacity.`);
   }
   const reportedOpenPositions = botState.openPositions || 0;
   const openCount = openSymbols.size;
   if (reportedOpenPositions !== openCount) {
-    console.log(`[GHOST_SLOT_CLEARED] Reported openPositions=${reportedOpenPositions} reconciled to realOpenPositions=${openCount}. Reduce-only orders, failed orders, and stale pending entries do not consume slots.`);
-    console.log(`[POSITION_SLOT_SOURCE_RECONCILED] Slots now count real open positions only.`);
     botState.openPositions = openCount;
   }
   const pendingEntries = countPendingEntrySymbols(openSymbols);
   const usedForSlots = openCount + pendingEntries;
   
+  if (usedForSlots === 0 && botState.protectionStatus !== "CONFIRMED") {
+    console.log(`[SLOT_CALCULATOR_RECOVERY] Resetting stuck protectionStatus (${botState.protectionStatus}) to CONFIRMED because there are no open positions or pending entries.`);
+    botState.protectionStatus = "CONFIRMED";
+  }
+
   botState.configuredMaxPositions = configuredMax;
   botState.usedPositions = openCount;
   botState.pendingEntryCount = pendingEntries;

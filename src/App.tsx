@@ -22,7 +22,9 @@ import {
   ChevronUp,
   Filter,
   Crosshair,
-  Compass
+  Compass,
+  RefreshCw,
+  AlertCircle
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -42,6 +44,7 @@ import { twMerge } from "tailwind-merge";
 import { ScannerPanel } from "./components/ScannerPanel";
 import { CoinMarketCapPanel } from "./components/CoinMarketCapPanel";
 import { SimpleDashboard } from "./components/SimpleDashboard";
+import { normalizePositions } from "./utils/positionNormalizer";
 
 function formatPrice(px: number | string | null | undefined): string {
   if (px === null || px === undefined) return "N/A";
@@ -180,6 +183,13 @@ function formatFundingRate(rate: number | undefined) {
 function AppContent() {
   const [status, setStatus] = useState<any>(null);
   const [secondsSinceLastUpdate, setSecondsSinceLastUpdate] = useState<number>(0);
+  const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
+  const [lastMarkUpdateTime, setLastMarkUpdateTime] = useState<number>(Date.now());
+
+  const [pollState, setPollState] = useState<"LIVE" | "STALE" | "ERROR">("LIVE");
+  const [backendTime, setBackendTime] = useState<number | null>(null);
+  const [receivedTime, setReceivedTime] = useState<number | null>(null);
+  const lastPollFailedRef = useRef(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -187,9 +197,17 @@ function AppContent() {
       if (lastWss) {
         setSecondsSinceLastUpdate(Math.max(0, Math.round((Date.now() - lastWss) / 1000)));
       }
+
+      // Check UI sync staleness of fetching (> 5 seconds triggers STALE)
+      const elapsedSinceSync = Date.now() - lastSyncTime;
+      if (elapsedSinceSync > 5000) {
+        setPollState((prev) => (prev === "ERROR" ? "ERROR" : "STALE"));
+      } else if (!lastPollFailedRef.current) {
+        setPollState("LIVE");
+      }
     }, 1000);
     return () => clearInterval(timer);
-  }, [status?.bot?.lastWssTime]);
+  }, [status?.bot?.lastWssTime, lastSyncTime]);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAdvancedMode, setIsAdvancedMode] = useState(() => {
@@ -327,11 +345,28 @@ function AppContent() {
   }, [configForm]);
 
   useEffect(() => {
+    let timeoutId: any;
     const fetchStatus = async () => {
+      // console.log("STATUS_POLL_TICK");
       try {
-        const res = await fetch("/api/status");
+        const res = await fetch(`/api/status?_t=${Date.now()}`, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" }
+        });
         if (res.ok) {
           const data = await res.json();
+          
+          if (lastPollFailedRef.current) {
+            console.log("STATUS_POLL_ERROR_RECOVERED");
+            lastPollFailedRef.current = false;
+          }
+
+          // console.log("STATUS_POLL_SUCCESS");
+
+          setBackendTime(data.serverTime || Date.now());
+          setReceivedTime(Date.now());
+          setLastSyncTime(Date.now());
+          setPollState("LIVE");
           
           if (data && data.bot) {
             const newActiveOrders = data.bot.activeOrders || [];
@@ -397,7 +432,23 @@ function AppContent() {
             prevTradesRef.current = newTrades;
           }
 
-          setStatus(data);
+          // Force deep/shallow copies of nested states to absolute guarantee state updates and prevent reactivation of stale references
+          const freshStatus = {
+            ...data,
+            bot: data.bot ? {
+              ...data.bot,
+              allPositions: data.bot.allPositions ? [...data.bot.allPositions] : [],
+              trades: data.bot.trades ? [...data.bot.trades] : [],
+              activeOrders: data.bot.activeOrders ? [...data.bot.activeOrders] : [],
+              candidates: data.bot.candidates ? [...data.bot.candidates] : [],
+            } : null
+          };
+
+          setStatus(freshStatus);
+
+          if (data.bot?.markPrices || data.bot?.markPrice) {
+            setLastMarkUpdateTime(Date.now());
+          }
           checkUiPerformance();
           if (data.bot?.config) {
             if (!lastSavedConfigRef.current || JSON.stringify(lastSavedConfigRef.current) === JSON.stringify(configFormRef.current)) {
@@ -406,15 +457,22 @@ function AppContent() {
               setLastSavedConfig(data.bot.config);
             }
           }
+        } else {
+          lastPollFailedRef.current = true;
+          setPollState("ERROR");
+          console.log("STATUS_POLL_WARN: Server returned non-200 status", res.status);
         }
-      } catch (e) {
-        // Silently catch fetch errors while server is starting
+      } catch (e: any) {
+        lastPollFailedRef.current = true;
+        setPollState("ERROR");
+        console.log("STATUS_POLL_WARN: Fetch process failed temporarily", e.message || "Network error");
+      } finally {
+        timeoutId = setTimeout(fetchStatus, 1000);
       }
     };
     
     fetchStatus();
-    const interval = setInterval(fetchStatus, 2000);
-    return () => clearInterval(interval);
+    return () => clearTimeout(timeoutId);
   }, []);
 
   const bot = status?.bot || {};
@@ -811,7 +869,7 @@ function AppContent() {
       )}
 
       {!isAdvancedMode ? (
-         <SimpleDashboard bot={bot} blockerInfo={blockerInfo} isAdvancedMode={isAdvancedMode} setIsAdvancedMode={handleSetAdvancedMode} />
+         <SimpleDashboard bot={bot} blockerInfo={blockerInfo} isAdvancedMode={isAdvancedMode} setIsAdvancedMode={handleSetAdvancedMode} status={status} />
       ) : (
       <main className="flex-1 flex flex-col xl:flex-row overflow-hidden relative">
         {/* Sidebar Panel */}
@@ -1533,68 +1591,107 @@ function AppContent() {
                 </div>
               </div>
 
-              {((bot.allPositions && bot.allPositions.length > 0) || (bot.positionDetails && parseFloat(bot.positionDetails.szi) !== 0)) ? (
+              {/* STALE / ERROR POLLING ALERT BANNER */}
+              {(pollState !== "LIVE" || (Date.now() - lastSyncTime > 5000)) && (
+                <div className={cn(
+                  "p-3.5 rounded-xl border flex items-center gap-3 animate-pulse text-xs font-black font-mono",
+                  (pollState === "ERROR")
+                    ? "bg-rose-500/10 border-rose-500/30 text-rose-400"
+                    : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                )}>
+                  <AlertTriangle className="w-4.5 h-4.5 text-amber-500" />
+                  <span className="uppercase tracking-widest font-bold">
+                    {pollState === "ERROR" ? "🛑 UI POLLING ERROR — SERVICE UNREACHABLE / RETRYING" : "⚠️ UI DATA STALE — NO COMPLETED UPDATE IN LAST 5 SECONDS"}
+                  </span>
+                </div>
+              )}
+
+              {/* Frontend Diagnostics Panel */}
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 bg-[#08090C] p-4 rounded-xl border border-slate-800/80 text-[10px] font-mono text-slate-400 leading-relaxed shadow-inner">
+                <div className="border-r border-slate-800/50 pr-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Positions (Raw/Norm)</span>
+                  <strong className="text-white text-xs">{bot.openPositions || 0}</strong>
+                  <span className="text-slate-500 text-[10px] mx-1">/</span>
+                  <strong className="text-amber-400 text-xs">{normalizePositions(status).length}</strong>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Last UI Sync</span>
+                  <strong className="text-slate-300 block">{new Date(lastSyncTime).toLocaleTimeString()}</strong>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Backend Sync</span>
+                  <strong className="text-indigo-400 block">{backendTime ? new Date(backendTime).toLocaleTimeString() : "—"}</strong>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Received Sync</span>
+                  <strong className="text-emerald-400 block">{receivedTime ? new Date(receivedTime).toLocaleTimeString() : "—"}</strong>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Polling Status</span>
+                  <span className={cn(
+                    "text-[9px] font-black uppercase px-2 py-0.5 rounded leading-none text-center font-mono border inline-block mt-0.5",
+                    pollState === "LIVE" && !(Date.now() - lastSyncTime > 5000)
+                      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" 
+                      : (pollState === "ERROR" ? "bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse" : "bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse")
+                  )}>
+                    {pollState === "LIVE" && !(Date.now() - lastSyncTime > 5000) ? "LIVE" : (pollState === "ERROR" ? "ERROR" : "STALE")}
+                  </span>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Active Sources</span>
+                  <span className="text-indigo-400 font-extrabold text-[9px] truncate block font-bold">all/state/details</span>
+                </div>
+                <div className="px-2 flex flex-col justify-center">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/reset?force=true", { method: "POST" });
+                        const data = await res.json();
+                        if (res.ok) {
+                          setStatus((s: any) => {
+                            if (!s) return s;
+                            return {
+                              ...s,
+                              bot: {
+                                ...s.bot,
+                                openPositions: 0,
+                                positionDetails: null,
+                                allPositions: [],
+                                blocker: null,
+                              }
+                            };
+                          });
+                        } else {
+                          console.error("Force reset failed", data.message);
+                        }
+                      } catch (e: any) {
+                        console.error("Network error forced reset", e);
+                      }
+                    }}
+                    className="w-full bg-amber-500 hover:bg-amber-400 text-black font-extrabold uppercase text-[7px] tracking-wider rounded py-1 transition-all cursor-pointer text-center border-none shadow-sm"
+                  >
+                    Force Clear Cache
+                  </button>
+                </div>
+              </div>
+
+              {normalizePositions(status).length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {(bot.allPositions || [bot.positionDetails]).filter(Boolean).map((pos: any, idx: number) => {
-                    const isLong = parseFloat(pos.szi) >= 0;
-                    const coin = pos.coin || bot.activeSymbol || "USDC";
-                    const currentUnrealizedPnl = parseFloat(pos.unrealizedPnl || 0);
-                    const roe = parseFloat(pos.returnOnEquity || 0) * 100;
-                    
-                    const entryTrade = (bot.trades || [])
-                      .slice()
-                      .reverse()
-                      .find((t: any) => t.symbol === coin && (t.type === "ENTRY" || t.type?.toUpperCase() === "ENTRY"));
-                    const holdTimeMs = entryTrade ? Date.now() - entryTrade.timestamp : null;
-                    const holdTimeFormatted = holdTimeMs ? formatDuration(holdTimeMs) : "—";
-
-                    if (!isAdvancedMode) {
-                      return (
-                        <div key={idx} className="bg-black/30 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between gap-5 hover:border-slate-700 transition-all shadow-md">
-                          <div className="flex justify-between items-center">
-                            <div className="flex items-center gap-3">
-                              <span className="text-xl font-black text-white font-mono tracking-tight">{coin}</span>
-                              <span className={cn(
-                                "text-[10px] font-black uppercase px-2.5 py-0.5 rounded leading-none text-center font-mono border",
-                                isLong ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-rose-500/10 text-rose-400 border-rose-500/20"
-                              )}>
-                                {isLong ? "LONG" : "SHORT"}
-                              </span>
-                            </div>
-                            <div className="text-right">
-                              <span className={cn("text-xl font-black font-mono block tracking-tight", currentUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                                {currentUnrealizedPnl >= 0 ? "+" : ""}${currentUnrealizedPnl.toFixed(2)}
-                              </span>
-                              <span className="text-xs text-slate-400 font-mono block mt-0.5">
-                                {roe >= 0 ? "+" : ""}{roe.toFixed(2)}%
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-4 text-sm font-mono bg-[#0A0B0D]/50 p-4 rounded-xl border border-slate-800/40">
-                            <div>
-                              <span className="text-slate-500 text-xs block mb-1">Entry Price</span>
-                              <span className="text-white font-black text-base">${formatPrice(pos.entryPx)}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-500 text-xs block mb-1">Hold Time</span>
-                              <span className="text-indigo-400 font-black text-base">{holdTimeFormatted}</span>
-                            </div>
-                            <div className="border-t border-slate-800/40 pt-2 mt-1">
-                              <span className="text-slate-500 text-xs block mb-1">Take Profit (TP)</span>
-                              <span className="text-emerald-400 font-black text-base">${formatPrice(bot.protection?.tpPrice)}</span>
-                            </div>
-                            <div className="border-t border-slate-800/40 pt-2 mt-1">
-                              <span className="text-slate-500 text-xs block mb-1">Stop Loss (SL)</span>
-                              <span className="text-rose-400 font-black text-base">${formatPrice(bot.protection?.slPrice)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
+                  {normalizePositions(status).map((pos: any) => {
+                    const isLong = pos.side === "LONG";
+                    const keyVal = `${pos.symbol}-${pos.side}-${pos.size}-${pos.entryPrice}-${pos.markPrice}-${pos.unrealizedPnl}-${lastSyncTime}`;
+                    const coin = pos.symbol;
+                    const currentUnrealizedPnl = pos.unrealizedPnl;
+                    const roe = pos.roe;
+                    const holdTimeFormatted = pos.timeInTrade;
+                    const tpPrice = pos.takeProfit;
+                    const slPrice = pos.stopLoss;
+                    const dynamicSl = pos.dynamicSl;
+                    const trailingStatus = pos.trailingStatus;
+                    const liqPx = pos.liquidationPrice || 0;
 
                     return (
-                      <div key={idx} className="bg-black/30 border border-slate-800/80 rounded-xl p-4 flex flex-col justify-between gap-4 hover:border-slate-700/80 transition-all">
+                      <div key={keyVal} className="bg-black/30 border border-slate-800/80 rounded-xl p-4 flex flex-col justify-between gap-4 hover:border-slate-700/80 transition-all">
                         {/* Top: Asset, Side, and PnL */}
                         <div className="flex justify-between items-start">
                           <div>
@@ -1607,7 +1704,7 @@ function AppContent() {
                                 {isLong ? "LONG" : "SHORT"}
                               </span>
                             </div>
-                            <p className="text-[10px] text-slate-500 font-mono mt-1">Size: {pos.szi}</p>
+                            <p className="text-[10px] text-slate-500 font-mono mt-1">Size: {pos.size}</p>
                           </div>
                           <div className="text-right">
                             <span className={cn("text-base font-black font-mono block", currentUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
@@ -1623,19 +1720,19 @@ function AppContent() {
                         <div className="grid grid-cols-2 gap-2 text-[10px] font-mono bg-[#0A0B0D]/50 p-2.5 rounded-lg border border-slate-800/40">
                           <div>
                             <span className="text-slate-500 block">Entry Price</span>
-                            <span className="text-slate-300 font-bold">${formatPrice(pos.entryPx)}</span>
+                            <span className="text-slate-300 font-bold">${formatPrice(pos.entryPrice)}</span>
                           </div>
                           <div>
                             <span className="text-slate-500 block">Mark Price</span>
-                            <span className="text-slate-300 font-bold">${formatPrice(bot.markPrices?.[coin] || bot.markPrice)}</span>
+                            <span className="text-slate-300 font-bold">${formatPrice(pos.markPrice)}</span>
                           </div>
                           <div>
                             <span className="text-slate-500 block">Take Profit</span>
-                            <span className="text-emerald-400 font-bold">${formatPrice(bot.protection?.tpPrice)}</span>
+                            <span className="text-emerald-400 font-bold">${tpPrice ? `$${formatPrice(tpPrice)}` : "N/A"}</span>
                           </div>
                           <div>
                             <span className="text-slate-500 block">Stop Loss</span>
-                            <span className="text-rose-400 font-bold">${formatPrice(bot.protection?.slPrice)}</span>
+                            <span className="text-rose-400 font-bold">${slPrice ? `$${formatPrice(slPrice)}` : "N/A"}</span>
                           </div>
                         </div>
 
@@ -1643,13 +1740,13 @@ function AppContent() {
                         <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 border-t border-slate-800/50 pt-2.5">
                           <div>
                             <span className="text-slate-500 text-[9px] block uppercase font-bold tracking-wider mb-0.5">Trailing Status</span>
-                            <span className={cn("font-extrabold", bot.protection?.isTrailingActive ? "text-indigo-400" : "text-slate-500")}>
-                              {bot.protection?.isTrailingActive ? "ACTIVE" : "INACTIVE"}
+                            <span className={cn("font-extrabold", trailingStatus === "ACTIVE" ? "text-indigo-400" : "text-slate-500")}>
+                              {trailingStatus}
                             </span>
                           </div>
                           <div className="text-right">
                             <span className="text-slate-500 text-[9px] block uppercase font-bold tracking-wider mb-0.5">Liquidation Price</span>
-                            <span className="text-orange-400 font-bold">${parseFloat(pos.liquidationPx || 0) > 0 ? parseFloat(pos.liquidationPx).toFixed(2) : "N/A"}</span>
+                            <span className="text-orange-400 font-bold">${liqPx > 0 ? formatPrice(liqPx) : "N/A"}</span>
                           </div>
                         </div>
                       </div>
@@ -1657,8 +1754,23 @@ function AppContent() {
                   })}
                 </div>
               ) : (
-                <div className="py-8 bg-black/10 border border-slate-800/60 rounded-xl text-center text-slate-500 font-mono text-xs uppercase tracking-widest italic">
-                  No Active Positions
+                <div className="py-8 bg-[#080B0D] border border-slate-800/60 rounded-xl text-center text-slate-500 font-mono text-xs uppercase tracking-widest italic flex flex-col items-center justify-center gap-2">
+                  {(!status || !status.bot) ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
+                      <span className="text-xs uppercase font-bold tracking-widest text-[#FCD535]">Updating open positions…</span>
+                    </>
+                  ) : (bot.openPositions || 0) > 0 ? (
+                    <>
+                      <AlertCircle className="w-5 h-5 text-amber-500 animate-bounce" />
+                      <span className="text-xs uppercase font-bold tracking-widest text-amber-500 normal-case">Position count detected but position details missing.</span>
+                    </>
+                  ) : (
+                    <>
+                      <Compass className="w-6 h-6 text-slate-700 animate-spin" style={{ animationDuration: "15s" }} />
+                      <span className="text-xs uppercase font-bold tracking-widest text-slate-500">No open positions right now.</span>
+                    </>
+                  )}
                 </div>
               )}
             </div>

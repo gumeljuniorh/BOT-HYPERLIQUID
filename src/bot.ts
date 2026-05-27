@@ -228,16 +228,19 @@ const NONESSENTIAL_EXECUTION_BLOCKERS = [
   "POSITION_SIZE_INVALID_COOLDOWN",
   "ROUTER_BLOCK_COOLDOWN",
   "DEAD_LOW_VOL",
-  "LOW_VOLATILITY"
-];
-
-const HARD_EXECUTION_BLOCKERS = [
-  "TP_SL_PRECHECK_FAILED",
-  "TP_SL_MISSING",
+  "LOW_VOLATILITY",
   "PROTECTION_REPAIRING",
   "PROTECTION_FAILED",
   "PROTECTION_SYNC_ERROR",
   "DUPLICATE_PROTECTION",
+  "MAX_OPEN_POSITIONS",
+  "EXECUTION_VALIDATION_DEBOUNCE",
+  "EXECUTION_VALIDATION",
+  "TP_SL_MISSING",
+  "TP_SL_PRECHECK_FAILED"
+];
+
+const HARD_EXECUTION_BLOCKERS = [
   "UNSAFE_COLLATERAL",
   "INSUFFICIENT_COLLATERAL",
   "INSUFFICIENT_FREE_COLLATERAL",
@@ -251,7 +254,6 @@ const HARD_EXECUTION_BLOCKERS = [
   "AUTH",
   "CORRUPTED_POSITION_STATE",
   "INVALID_ORDER_SIZE",
-  "ORDER_VALIDATION_REJECTED",
   "HARD_DRAWDOWN",
   "SEVERE_DRAWDOWN",
   "CATASTROPHIC",
@@ -394,9 +396,9 @@ export async function programmaticClosePosition(sym: string, reason: string): Pr
     
     const sz = Math.abs(szi);
     const isBuy = szi < 0; 
-    const exitPrice = isBuy ? currentPrice * 1.01 : currentPrice * 0.99;
+    const exitPrice = isBuy ? currentPrice * 1.05 : currentPrice * 0.95;
     
-    const success = await executionEngine.placeOrder(sym, isBuy, sz, exitPrice, true, true);
+    const success = await executionEngine.placeOrder(sym, isBuy, sz, exitPrice, true, false);
     if (success) {
       console.log(`[CAPITAL_ROTATION_CLOSE_SUCCESS] Position closed for ${sym}.`);
       return true;
@@ -561,7 +563,7 @@ async function verifyProtectionOrders() {
               Math.abs(szi),
               isLong ? currentPrice * 0.95 : currentPrice * 1.05,
               true,
-              true
+              false
             );
             if (isExitSuccess) {
                console.log(`[EMERGENCY_CLOSE_TP_SL_MISSING] Triggered reduce-only close for ${sym}.`);
@@ -3517,9 +3519,15 @@ async function handleTradingLogic(isEmergencyMode = false) {
       } else if (!botState.apiConnected && !config.DRY_RUN) {
         blockerCode = "ENTRY_ENGINE_DISABLED";
       } else {
-        const exposureAllowed = botState.openPositions < limit;
+        const _limit = getDynamicMaxPositions().limit;
+        const exposureAllowed = botState.openPositions < _limit;
         if (!exposureAllowed) {
             blockerCode = "MAX_POSITIONS_REACHED";
+            (botState.telemetry as any).blockedByExposure = ((botState.telemetry as any).blockedByExposure || 0) + 1;
+            console.log(`[SOFT_BLOCK_CONVERSION] Max positions reached (${botState.openPositions}/${_limit}). Downgrading setup to prevent execution without blocking evaluation loop.`);
+            // Apply soft penalty instead of hard block
+            applySoftExecutionAdjustment(opp, "MAX_POSITIONS_REACHED", 0.5, 0.7);
+            blockerCode = "PASSED"; // Allow loop to continue, router will debounce or rank it low
         }
       }
         
@@ -3527,13 +3535,34 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const markPriceLocal = botState.markPrices ? botState.markPrices[sym] : 0;
           const expMoveLocal = sig.expectedMovePct || 1.0;
           const isBuyLocal = sig.direction === "LONG";
-          const reqLevLocal = Math.min(2, botState.config.leverage || 2);
+          
+          // Use unified leverage tier instead of rigid default 2
+          const reqLevLocal = Math.max(2, Math.min(opp.leverageTier || opp.leverageSelected || botState.config.leverage || 2, botState.config.leverage || 10));
           
           if (markPriceLocal > 0) {
             const assetMetaLocal = getAssetMeta(sym);
-            const rawSlPct = (assetMetaLocal && assetMetaLocal.maxLeverage <= 3) ? 2.5 : 1.5;
-            const rawTpPct = Math.max(rawSlPct * 0.25, expMoveLocal * 0.9);
             
+            // Base SL varies by leverage: 2x (4%), 4x (2.5%), 8x (1.25%), 10x (1%)
+            let rawSlPct = 4.0;
+            if (reqLevLocal >= 10) rawSlPct = 0.9;
+            else if (reqLevLocal >= 8) rawSlPct = 1.1;
+            else if (reqLevLocal >= 5) rawSlPct = 1.8;
+            else if (reqLevLocal >= 3) rawSlPct = 2.5;
+
+            // Restrict SL further for highly volatile unsafe assets
+            if (assetMetaLocal && assetMetaLocal.maxLeverage <= 3) {
+                rawSlPct = Math.min(rawSlPct, 2.5);
+            }
+            
+            // Determine minimum viable TP to avoid tiny exits
+            const minEffectiveTpPct = 0.45;
+            let rawTpPct = Math.max(rawSlPct * 0.35, expMoveLocal * 0.9, minEffectiveTpPct);
+            
+            // Adjust if TP/SL becomes mismatched under high leverage
+            if (reqLevLocal >= 8 && rawTpPct < 1.0) {
+                rawTpPct = Math.max(1.0, expMoveLocal);
+            }
+
             const secureLimitLocal = calculateSafeTpSl(
               sym,
               isBuyLocal ? "LONG" : "SHORT",
@@ -5187,7 +5216,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
         }
         
         const collateralHealthy = botState.accountEquity > 10;
-        const exposureAllowed = botState.openPositions < limit;
+        const _limit = getDynamicMaxPositions().limit;
+        const exposureAllowed = botState.openPositions < _limit;
 
         if (!collateralHealthy) {
           console.log(`[ENTRY_FILTER] Trade blocked: Free collateral insufficient for Phase 2.`);
@@ -5196,10 +5226,10 @@ async function handleTradingLogic(isEmergencyMode = false) {
           return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
         }
         if (!exposureAllowed) {
-          console.log(`[ENTRY_FILTER] Trade blocked: Phase 2 exposure limits reached.`);
+          console.log(`[ENTRY_FILTER] Trade blocked softly: Phase 2 exposure limits reached (${botState.openPositions}/${_limit}). Reducing size modifier.`);
           botState.blocker = "EXPOSURE_LIMITS_REACHED";
-          logEntryBlocked(botState.activeSymbol, "MAX_EXPOSURE", `openPositions=${botState.openPositions}, maxOpenPositions=${limit}, availableSlots=${botState.availableSlots || 0}`);
-          return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
+          // soft execution block downgrade handled above
+          // do NOT return blocker, let router queue it
         }
       }
 
@@ -6510,8 +6540,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
         _setupLeverage = setupLeverage;
 
         // Calculate Protection Parameters
-        let tpPct = botState.config.takeProfitPct || 2.0;
-        let slPct = botState.config.stopLossPct || 0.5;
+        // Scale protection bounds by leverage tier
+        let slPct = 2.5;
+        if (setupLeverage >= 10) slPct = 0.9;
+        else if (setupLeverage >= 8) slPct = 1.1;
+        else if (setupLeverage >= 5) slPct = 1.8;
+        else if (setupLeverage >= 3) slPct = 2.5;
+        
+        let tpPct = Math.max(slPct * 0.35, (signal.expectedMovePct || 1.0) * 0.9, 0.45);
+        if (setupLeverage >= 8 && tpPct < 1.0) {
+            tpPct = Math.max(1.0, (signal.expectedMovePct || 1.0));
+        }
 
         if (currentOpp && (currentOpp as any).tpSlAggressivenessModifier !== undefined && (currentOpp as any).tpSlAggressivenessModifier < 1.0) {
           const mod = (currentOpp as any).tpSlAggressivenessModifier;
@@ -7651,9 +7690,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
         await executionEngine.cancelAllOrders(botState.activeSymbol);
 
         const sz = Math.abs(szi);
-        // Use aggressive price for exit to ensure fill (1% slippage)
+        // Use aggressive price for exit to ensure fill (5% slippage to guarantee execution)
         const exitPrice =
-          currentSide === "LONG" ? currentPrice * 0.99 : currentPrice * 1.01;
+          currentSide === "LONG" ? currentPrice * 0.95 : currentPrice * 1.05;
 
         // Execute exit with latency logging
         console.log("EXIT_ORDER_SUBMITTED: Reversing position to close.");
@@ -7664,7 +7703,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           sz,
           exitPrice,
           true,
-          true
+          false // isIoc = false to allow it to fully execute like a market order
         );
         const apiLatency = Date.now() - exitStartTime;
 
@@ -7674,6 +7713,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log("POSITION_EXIT_DETECTED");
           botState.lastCloseReason = exitReason;
 
+          const closingCoin = botState.activeSymbol;
+
           let isReconciled = false;
           let reconciliationRetries = 0;
           let fillPrice = botState.lastFillPrice || currentPrice;
@@ -7682,7 +7723,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           // 4. Confirm exchange reconciliation after exit
           while (reconciliationRetries < 12 && !isReconciled) {
              await syncAccountState();
-             const stillOpen = botState.allPositions?.find((p: any) => p.coin === botState.activeSymbol && parseFloat(p.szi) !== 0);
+             const stillOpen = botState.allPositions?.find((p: any) => p.coin === closingCoin && parseFloat(p.szi) !== 0);
              if (!stillOpen) {
                  isReconciled = true;
                  break;
@@ -7704,19 +7745,19 @@ async function handleTradingLogic(isEmergencyMode = false) {
           }
 
           if (!isReconciled) {
-              console.error("EXIT_RECONCILIATION_FAILED: Position is still open after exit order.");
+              console.error(`EXIT_RECONCILIATION_FAILED: ${closingCoin} Position is still open after exit order.`);
               botState.lastCloseReason = isEmergencyMode ? "MANUAL_CLOSE_REQUIRED" : "EMERGENCY_CLOSE_RETRY";
               return;
           }
 
-          console.log("EXIT_RECONCILIATION_COMPLETE");
+          console.log(`EXIT_RECONCILIATION_COMPLETE for ${closingCoin}`);
 
           try {
               const budget = (await import("./services/apiBudgetManager.js")).apiBudgetManager.reserveInfo("metadata", "userFills");
               if (budget.allowed) {
                   const fills = await hClient.infoRequest({ type: "userFills", user: config.HYPERLIQUID_WALLET_ADDRESS });
                   if (fills && Array.isArray(fills)) {
-                      const latestFill = fills.find((f: any) => f.coin === botState.activeSymbol && f.dir === (currentSide === "LONG" ? "Sell" : "Buy"));
+                      const latestFill = fills.find((f: any) => f.coin === closingCoin && f.dir === (currentSide === "LONG" ? "Sell" : "Buy"));
                       if (latestFill) {
                          fillPrice = parseFloat(latestFill.px);
                          actualFees = parseFloat(latestFill.fee);
@@ -7741,7 +7782,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const isChaoticVol = regime.includes("EXTREME_DIRECTIONAL_VOL") || regime.includes("PARABOLIC") || botState.drawdownSeverity === "MODERATE" || botState.drawdownSeverity === "HARD";
 
           // Find CMC match to check narrative
-          const entryCmc = botState.cmcIntelligence?.assets.find(a => a.matchedSymbol === botState.activeSymbol || a.symbol === botState.activeSymbol);
+          const entryCmc = botState.cmcIntelligence?.assets.find(a => a.matchedSymbol === closingCoin || a.symbol === closingCoin);
           const strongestNarrative = botState.cmcIntelligence?.strongestNarrative || "AI";
           const isStrongNarrative = entryCmc && (
             entryCmc.narrative === strongestNarrative || 
@@ -7755,9 +7796,9 @@ async function handleTradingLogic(isEmergencyMode = false) {
             cooldownDurationMs = 180 * 1000; // 3 minutes on standard loss
             
             // Extend further if consecutive repeated loss on same symbol
-            if (botState.lastCooldownSymbol === botState.activeSymbol && botState.lastCloseReason && botState.lastCloseReason.includes("STOP_LOSS")) {
+            if (botState.lastCooldownSymbol === closingCoin && botState.lastCloseReason && botState.lastCloseReason.includes("STOP_LOSS")) {
               cooldownDurationMs = Math.max(cooldownDurationMs, 10 * 60 * 1000); // 10 minutes
-              console.log(`[CHOP_COOLDOWN_EXTENDED] Consecutive loss on same asset detected. Extending cooldown penalty on ${botState.activeSymbol}To 10 minutes.`);
+              console.log(`[CHOP_COOLDOWN_EXTENDED] Consecutive loss on same asset detected. Extending cooldown penalty on ${closingCoin}To 10 minutes.`);
             }
           } else {
             // Successful exit / Profit taking
@@ -7775,14 +7816,14 @@ async function handleTradingLogic(isEmergencyMode = false) {
           if (isChop) {
             classifiedCooldownType = "CHOP_COOLDOWN";
             cooldownDurationMs = Math.max(cooldownDurationMs, 5 * 60 * 1000); // extend to 5 mins
-            console.log(`[CHOP_COOLDOWN_EXTENDED] Cooldown extended due to chop or dead low volatility on ${botState.activeSymbol}. Duration: 5 minutes.`);
+            console.log(`[CHOP_COOLDOWN_EXTENDED] Cooldown extended due to chop or dead low volatility on ${closingCoin}. Duration: 5 minutes.`);
           }
 
           // Strong Narrative & CMC Trends
           if (isStrongNarrative && !exitIsLoss) {
             classifiedCooldownType = "NARRATIVE_CONTINUATION_COOLDOWN";
             cooldownDurationMs = 15 * 1000; // very fast re-engagement: 15s
-            console.log(`[NARRATIVE_PERSISTENCE_DETECTED] High narrative persistence detected for ${botState.activeSymbol} (Sector: ${entryCmc?.narrative}). Reducing cooldown to 15s.`);
+            console.log(`[NARRATIVE_PERSISTENCE_DETECTED] High narrative persistence detected for ${closingCoin} (Sector: ${entryCmc?.narrative}). Reducing cooldown to 15s.`);
             console.log(`[COOLDOWN_REDUCED_BY_CONTINUATION] Aggressive reduction on narrative continuity.`);
           } else if (isTrending && !exitIsLoss) {
             classifiedCooldownType = "EARLY_REENTRY_COOLDOWN";
@@ -7813,7 +7854,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
             cType = "HARD"; hardReason = "emergency close";
           } else if (overtradingScore > 3) {
             cType = "HARD"; hardReason = "overtrading spike";
-          } else if (exitIsLoss && botState.lastCooldownSymbol === botState.activeSymbol && botState.lastCloseReason && botState.lastCloseReason.includes("STOP_LOSS")) {
+          } else if (exitIsLoss && botState.lastCooldownSymbol === closingCoin && botState.lastCloseReason && botState.lastCloseReason.includes("STOP_LOSS")) {
             cType = "HARD"; hardReason = "repeated same-structure losses";
             cooldownDurationMs = Math.max(cooldownDurationMs, 10 * 60 * 1000); // 10 min penalty
           } else if (exitReason.includes("LIQUIDATION")) {
@@ -7857,7 +7898,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           botState.cooldownUntil = Date.now() + cooldownDurationMs;
           botState.cooldownType = cType;
           botState.lastExitWasSuccessful = !exitIsLoss;
-          botState.lastCooldownSymbol = botState.activeSymbol;
+          botState.lastCooldownSymbol = closingCoin;
           botState.reverseLockUntil = Date.now() + 2 * 60 * 1000; // 2-minute reverse lock
           botState.lastCloseSide = currentSide;
 
@@ -7879,7 +7920,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           await tradeLogger.logTrade({
             timestamp: Date.now(),
             type: "EXIT",
-            symbol: botState.activeSymbol,
+            symbol: closingCoin,
             side: currentSide,
             size: sz,
             entryPrice: entryPx,
@@ -7911,14 +7952,14 @@ async function handleTradingLogic(isEmergencyMode = false) {
           if (netRealizedPnl < 0) {
              const isFakeBreakout = signal.marketRegime?.includes("BREAKOUT") && exitReasonText.includes("STOP_LOSS");
              if (isFakeBreakout) {
-                console.log(`FALSE_BREAKOUT_THRESHOLD_INCREASED: Fake breakout loss on ${botState.activeSymbol}. Threshold will adjust automatically.`);
+                console.log(`FALSE_BREAKOUT_THRESHOLD_INCREASED: Fake breakout loss on ${closingCoin}. Threshold will adjust automatically.`);
                 botState.cooldownUntil = Date.now() + 5 * 60 * 1000; // Extend cooldown
              }
           } else if (netRealizedPnl > 0) {
              const isContinuation = signal.marketRegime?.includes("CONTINUATION");
              if (isContinuation) {
                 botState.analytics.recentEntryBias = "ACCURATE";
-                console.log(`RECENT_ENTRY_BIAS_UPDATED: Bias updated to ACCURATE due to successful continuation on ${botState.activeSymbol}.`);
+                console.log(`RECENT_ENTRY_BIAS_UPDATED: Bias updated to ACCURATE due to successful continuation on ${closingCoin}.`);
              }
           }
           
@@ -7942,8 +7983,8 @@ async function handleTradingLogic(isEmergencyMode = false) {
             console.log("[MINIMUM_HOLD_STATE_CLEARED] Minimum hold state cleared. MINIMUM_HOLD_STATE_CLEARED.");
           }
 
-          if ((botState as any).protectionByCoin && (botState as any).protectionByCoin[botState.activeSymbol]) {
-              delete (botState as any).protectionByCoin[botState.activeSymbol];
+          if ((botState as any).protectionByCoin && (botState as any).protectionByCoin[closingCoin]) {
+              delete (botState as any).protectionByCoin[closingCoin];
           }
 
           // Fetch final updated state instead of forcefully wiping everything to 0
@@ -8330,7 +8371,7 @@ async function loop() {
     LIVE_TRADING: config.LIVE_TRADING,
     privateKeyPresent: isPrivateKeyPresent,
     orderSubmissionEnabled: isOrderSubmissionEnabled,
-    exchangeMutationsAllowed: config.ENABLE_ORDER_SUBMISSION && config.LIVE_TRADING && isPrivateKeyPresent && isOrderSubmissionEnabled && !config.DRY_RUN
+    exchangeMutationsAllowed: config.ENABLE_ORDER_SUBMISSION && config.LIVE_TRADING && isOrderSubmissionEnabled && !config.DRY_RUN
   };
   
   const wasLive = botState.liveModeEnabled;

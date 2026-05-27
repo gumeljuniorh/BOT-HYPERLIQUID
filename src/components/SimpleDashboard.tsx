@@ -33,6 +33,7 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { ScannerPanel } from "./ScannerPanel";
 import { CoinMarketCapPanel } from "./CoinMarketCapPanel";
+import { normalizePositions } from "../utils/positionNormalizer";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -85,7 +86,7 @@ const getCleanSystemStatus = (blocker: string | null, activePhase: string | null
   return { label: "Active Scanning", color: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20" };
 };
 
-export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvancedMode }: any) {
+export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvancedMode, status }: any) {
   const [activeTab, setActiveTab] = useState<"positions" | "fills" | "scanner" | "cmc" | "metrics">("positions");
   const [consoleLogs, setConsoleLogs] = useState<string[]>([
     `[${new Date().toLocaleTimeString()}] [SYS_BOOT] Hyperliquid Terminal Cockpit loaded successfully.`,
@@ -146,7 +147,7 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
       "0",
   );
 
-  const allPositions = bot.allPositions || [];
+  const allPositions = normalizePositions(status || { bot });
   const trades = bot.trades || [];
 
   const marginUsage = bot.accountEquity 
@@ -354,33 +355,51 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
                         <tr>
                           <td colSpan={7} className="px-4 py-16 text-center text-slate-500 bg-[#080B0D]">
                             <div className="flex flex-col items-center justify-center gap-2">
-                              <Compass className="w-10 h-10 text-slate-700 animate-spin" style={{ animationDuration: "15s" }} />
-                              <span className="text-xs uppercase font-bold tracking-widest text-slate-500">NO ACTIVE POSITIONS DETECTED</span>
-                              <p className="text-[10px] text-slate-500 max-w-sm mt-0.5">
-                                Perpetual system is actively scanning indicators for momentum breakouts to initiate entry.
-                              </p>
+                              {(!status || !status.bot) ? (
+                                <>
+                                  <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin" />
+                                  <span className="text-xs uppercase font-bold tracking-widest text-[#FCD535]">Updating open positions…</span>
+                                  <p className="text-[10px] text-slate-500 max-w-sm mt-0.5">
+                                    Establishing active session handshake with host nodes. Retrying cache...
+                                  </p>
+                                </>
+                              ) : (bot.openPositions || 0) > 0 ? (
+                                <>
+                                  <AlertCircle className="w-8 h-8 text-amber-500 animate-bounce" />
+                                  <span className="text-xs uppercase font-bold tracking-widest text-amber-400">Position count detected but position details missing.</span>
+                                  <p className="text-[10px] text-slate-500 max-w-sm mt-0.5">
+                                    The trading ledger reported {bot.openPositions} active slot(s), but position metadata array is currently empty.
+                                  </p>
+                                </>
+                              ) : (
+                                <>
+                                  <Compass className="w-10 h-10 text-slate-600 animate-spin" style={{ animationDuration: "15s" }} />
+                                  <span className="text-xs uppercase font-bold tracking-widest text-slate-500">No open positions right now.</span>
+                                  <p className="text-[10px] text-slate-500 max-w-sm mt-0.5">
+                                    Perpetual system is actively scanning indicators for momentum breakouts to initiate entry.
+                                  </p>
+                                </>
+                              )}
                             </div>
                           </td>
                         </tr>
                       ) : (
-                        allPositions.map((pos: any, idx: number) => {
-                          const isLong = parseFloat(pos.szi) > 0;
-                          const posPnl = parseFloat(pos.unrealizedPnl || "0");
-                          const posRoe = parseFloat(pos.returnOnEquity || "0") * 100;
-                          const markPx = bot.markPrices?.[pos.coin] || bot.markPrice;
-                          
-                          // Look up specific parameters
-                          const tpPrice = bot.activeSymbol === pos.coin ? bot.protection?.tpPrice : pos.tpPrice;
-                          const slPrice = bot.activeSymbol === pos.coin ? bot.protection?.slPrice : pos.slPrice;
-                          const liqPx = parseFloat(pos.liquidationPx || "0");
+                        allPositions.map((pos: any) => {
+                          const isLong = pos.side === "LONG";
+                          const keyVal = `${pos.symbol}-${pos.side}-${pos.size}-${pos.entryPrice}-${pos.markPrice}-${pos.unrealizedPnl}-${status?.serverTime || Date.now()}`;
+                          const posPnl = pos.unrealizedPnl;
+                          const posRoe = pos.roe;
+                          const tpPrice = pos.takeProfit;
+                          const slPrice = pos.stopLoss;
+                          const liqPx = pos.liquidationPrice || 0;
                           
                           return (
-                            <tr key={idx} className="hover:bg-[#141920] transition-colors border-b border-[#1F252C] group">
+                            <tr key={keyVal} className="hover:bg-[#141920] transition-colors border-b border-[#1F252C] group">
                               <td className="px-4 py-3">
                                 <div className="flex items-center gap-2.5">
                                   <div className="flex flex-col">
                                     <span className="font-black text-[12px] text-white">
-                                      {pos.coin} <span className="text-[10px] text-slate-500 font-normal">Perp</span>
+                                      {pos.symbol} <span className="text-[10px] text-slate-500 font-normal">Perp</span>
                                     </span>
                                     <span className={cn(
                                       "text-[9px] font-black tracking-widest px-1 py-0.5 rounded text-center w-12 mt-1",
@@ -392,13 +411,13 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right font-bold text-white text-xs tracking-tight">
-                                {Math.abs(parseFloat(pos.szi))}
+                                {pos.size}
                               </td>
                               <td className="px-4 py-3 text-right text-slate-300">
-                                ${formatPrice(pos.entryPx)}
+                                ${formatPrice(pos.entryPrice)}
                               </td>
                               <td className="px-4 py-3 text-right text-[#FCD535] font-bold">
-                                ${formatPrice(markPx)}
+                                ${formatPrice(pos.markPrice)}
                               </td>
                               <td className="px-4 py-3 text-right text-orange-400">
                                 {liqPx > 0 ? `$${formatPrice(liqPx)}` : "—"}
@@ -833,6 +852,28 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
               <div className={cn("mt-2 p-1.5 rounded text-center border text-[9.5px]", bot?.liveModeEnabled ? "bg-emerald-900/20 border-emerald-500/30 text-emerald-400" : "bg-rose-900/20 border-rose-500/30 text-rose-500")}>
                  <span>Exchange Mutations: <strong>{bot?.liveModeDiagnostics?.exchangeMutationsAllowed ? "ALLOWED_AND_DISPATCHING" : "DISABLED_AND_LOCKED"}</strong></span>
               </div>
+              <button
+                onClick={async () => {
+                  try {
+                    const nextDryRun = !bot?.liveModeDiagnostics?.DRY_RUN;
+                    await fetch("/api/toggle-dry-run", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ dryRun: nextDryRun })
+                    });
+                  } catch (e) {
+                    console.error("Failed to toggle dry run mode", e);
+                  }
+                }}
+                className={cn(
+                  "mt-3 w-full font-sans font-extrabold uppercase text-[9px] tracking-wider py-1.5 rounded-lg border transition-all cursor-pointer text-center",
+                  bot?.liveModeDiagnostics?.DRY_RUN
+                    ? "bg-emerald-500 hover:bg-emerald-400 text-black border-none shadow-md"
+                    : "bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border-amber-500/30"
+                )}
+              >
+                {bot?.liveModeDiagnostics?.DRY_RUN ? "🚀 Switch to Live Trading" : "🛡️ Switch to Dry Run (Safe)"}
+              </button>
               {bot?.liveModeDiagnostics?.LIVE_TRADING && bot?.liveModeDiagnostics?.DRY_RUN && (
                 <div className="mt-2 p-1.5 bg-rose-950/40 border border-rose-500/50 rounded flex items-center gap-2">
                   <AlertCircle className="w-3.5 h-3.5 text-rose-450 shrink-0" />

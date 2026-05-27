@@ -92,30 +92,6 @@ export interface ScannerOpportunity {
   liquidityPass?: boolean;
   collateralPass?: boolean;
   watchlistState?: string;
-  addressPacingQueuedRank?: number;
-  addressPacingStatus?: "ADDRESS_ACTION_WAITING_FOR_NEXT_SLOT" | "READY" | string;
-}
-
-export interface AddressPacingCandidate {
-  symbol: string;
-  side: string;
-  finalExecutionScore: number;
-  leverage: number | null;
-  size: number | null;
-  rank: number;
-}
-
-export interface AddressPacingState {
-  active: boolean;
-  status: "ACTIVE" | "INACTIVE";
-  reason: string;
-  nextActionAllowedAt: number;
-  retryAfterMs: number;
-  queuedCandidates: AddressPacingCandidate[];
-  reservedCandidate: AddressPacingCandidate | null;
-  lastActionSentAt: number;
-  laneStatus: "WAITING" | "READY";
-  updatedAt: number;
 }
 
 export interface BotState {
@@ -151,7 +127,18 @@ export interface BotState {
   wssConnected: boolean;
   apiRateLimitUntil?: number;
   addressActionPacingUntil?: number;
-  addressPacing?: AddressPacingState;
+  addressPacing?: {
+    active: boolean;
+    status: string;
+    reason: string;
+    nextActionAllowedAt: number;
+    retryAfterMs: number;
+    queuedCandidates: any[];
+    reservedCandidate: any | null;
+    lastActionSentAt: number;
+    laneStatus: string;
+    updatedAt: number;
+  };
   orderSubmittedFailedUntil?: number;
   apiBudget?: any;
   routerBlockCooldowns?: Record<string, number>;

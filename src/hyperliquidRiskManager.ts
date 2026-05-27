@@ -51,14 +51,7 @@ export class HyperliquidRiskManager {
       return false;
     }
 
-    const entriesLastHour = (botState.trades || []).filter((trade) => trade.type === "ENTRY" && now - trade.timestamp < 60 * 60 * 1000).length;
-    if (entriesLastHour >= config.MAX_TRADES_PER_HOUR) {
-      botState.blocker = "OVERTRADING_PROTECTION_ACTIVE";
-      console.warn(`[PHASE_1_SAFETY_CONFIG] Overtrading protection active. entriesLastHour=${entriesLastHour}, max=${config.MAX_TRADES_PER_HOUR}.`);
-      console.warn(`[ENTRY_BLOCKED] symbol=${symbol}, reason=COOLDOWN, detail=MAX_TRADES_PER_HOUR, entriesLastHour=${entriesLastHour}, max=${config.MAX_TRADES_PER_HOUR}`);
-      return false;
-    }
-
+    // Overtrading protection removed per user request
     const reservePct = botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT;
     if ((botState.freeCollateralPct || 100) < reservePct) {
       botState.blocker = "BALANCE_RESERVE_REQUIRED";

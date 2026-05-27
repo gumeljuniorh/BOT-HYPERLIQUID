@@ -23,7 +23,7 @@ export function formatHyperliquidPrice(px: number): string {
 export function classifyExchangeRejection(error: string): string {
   const normalized = (error || "").toLowerCase();
   if (normalized.includes("entry_blocked_no_available_slo") || normalized.includes("entry_blocked_no_available_slot")) return "INTERNAL_ENTRY_SLO_CAPACITY";
-  if (normalized.includes("address_action_waiting_for_next_slot") || normalized.includes("address_limit_one_action_per_10s") || normalized.includes("one_action_per_10s") || (normalized.includes("address") && normalized.includes("10s"))) return "ADDRESS_ACTION_PACING_REQUIRED";
+  if (normalized.includes("address_limit_one_action_per_10s") || normalized.includes("one_action_per_10s") || (normalized.includes("address") && normalized.includes("10s"))) return "ADDRESS_ACTION_PACING_REQUIRED";
   if (normalized.includes("auth") || normalized.includes("signer") || normalized.includes("private key") || normalized.includes("signature")) return "AUTH_FAILURE";
   if (normalized.includes("api_budget") || normalized.includes("rest_pressure") || normalized.includes("execution_layer_throttled")) return "API_BUDGET_LIMIT";
   if (normalized.includes("rate limit") || normalized.includes("too many cumulative") || normalized.includes("exceeded") || normalized.includes("volume traded")) return "API_RATE_LIMIT";
@@ -41,27 +41,11 @@ export class HyperliquidExecutionEngine {
 
   private applyAddressActionPacing(symbol: string, raw: string, retryAfterMs?: number) {
     const waitMs = Math.max(1000, retryAfterMs || apiBudgetManager.getAddressActionRetryAfterMs() || 10000);
-    const now = Date.now();
-    apiBudgetManager.enableAddressLimitRecovery();
     botState.lastApiError = `ADDRESS_ACTION_PACING_REQUIRED: ${raw}`;
-    botState.executionThrottleUntil = now + waitMs;
-    botState.addressActionPacingUntil = now + waitMs;
+    botState.executionThrottleUntil = Date.now() + waitMs;
+    botState.addressActionPacingUntil = Date.now() + waitMs;
     botState.blocker = "ADDRESS_ACTION_PACING_ACTIVE";
-    botState.addressPacing = {
-      active: true,
-      status: "ACTIVE",
-      reason: "one action per 10 seconds",
-      nextActionAllowedAt: now + waitMs,
-      retryAfterMs: waitMs,
-      queuedCandidates: botState.addressPacing?.queuedCandidates || [],
-      reservedCandidate: botState.addressPacing?.reservedCandidate || null,
-      lastActionSentAt: apiBudgetManager.getLastAddressActionAt(),
-      laneStatus: waitMs > 0 ? "WAITING" : "READY",
-      updatedAt: now
-    };
-    console.warn(`[ADDRESS_PACING_GLOBAL_STATE_ACTIVE] Hyperliquid address action pacing active. nextAllowedIn=${Math.ceil(waitMs / 1000)}s.`);
-    console.warn(`[ADDRESS_PACING_SYMBOL_SPAM_SUPPRESSED] ${symbol} deferred by global address lane; candidate should remain queued instead of rejected.`);
-    console.warn(`[ADDRESS_ACTION_PACING_DETECTED] retryAfterMs=${waitMs}, raw=${raw}`);
+    console.warn(`[ADDRESS_ACTION_PACING_DETECTED] symbol=${symbol}, retryAfterMs=${waitMs}, raw=${raw}`);
     console.warn(`[ORDER_SUBMISSION_DEFERRED_ADDRESS_PACING] ${symbol} order deferred instead of marked unrecoverable.`);
     console.warn(`[ORDER_RETRY_SCHEDULED_AFTER_ADDRESS_PACING] ${symbol} retry eligible in ${Math.ceil(waitMs / 1000)}s.`);
   }
