@@ -7,17 +7,10 @@ import { apiBudgetManager } from "./services/apiBudgetManager.js";
 
 export function formatHyperliquidPrice(px: number): string {
   if (px <= 0 || isNaN(px) || !isFinite(px)) return "0";
-  const log = Math.floor(Math.log10(px));
-  const tickSize = Math.max(1e-6, Math.pow(10, log - 4));
-  const roundedPx = Math.round(px / tickSize) * tickSize;
-  let formattedPx = Number(roundedPx.toPrecision(5)).toString();
-  if (formattedPx.includes("e")) {
-    formattedPx = Number(formattedPx).toLocaleString('fullwide', {
-      useGrouping: false,
-      maximumSignificantDigits: 5
-    });
-  }
-  return formattedPx;
+  return Number(px.toPrecision(5)).toLocaleString('en-US', {
+    useGrouping: false,
+    maximumSignificantDigits: 5
+  });
 }
 
 export function classifyExchangeRejection(error: string): string {

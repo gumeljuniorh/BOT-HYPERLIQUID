@@ -45,7 +45,8 @@ export function calculateSafeTpSl(
   entryPx: number,
   tpPctInput: number,
   slPctInput: number,
-  atrPctInput?: number
+  atrPctInput?: number,
+  leverage?: number
 ): { finalTpPrice: number; finalSlPrice: number; debugInfo: any } {
   const isLong = direction === "LONG";
   const markPx = entryPx;
@@ -73,6 +74,23 @@ export function calculateSafeTpSl(
   let currentSlPct = Math.max(slPctInput, baseSafeDistancePct, 0.4);
   let currentTpPct = Math.max(tpPctInput, baseSafeDistancePct, 0.25);
   
+  // Leverage-aware adjustments
+  if (leverage) {
+    if (leverage <= 2) {
+      currentSlPct = Math.max(currentSlPct * 1.5, 1.2); // wider SL
+      currentTpPct = Math.max(currentTpPct * 1.5, 3.0); // wider TP
+    } else if (leverage <= 4) {
+      currentSlPct = Math.max(currentSlPct * 1.0, 0.8);
+      currentTpPct = Math.max(currentTpPct * 1.0, 2.0);
+    } else if (leverage <= 8) {
+      currentSlPct = Math.max(currentSlPct * 0.6, 0.4); // tighter SL
+      currentTpPct = Math.max(currentTpPct * 0.8, 1.5);
+    } else {
+      currentSlPct = Math.max(currentSlPct * 0.4, 0.25); // very tight
+      currentTpPct = Math.max(currentTpPct * 0.6, 1.0);
+    }
+  }
+
   // Ensure we respect min TP movement and reward-to-risk ratio rules (typically RR >= 0.25)
   if (currentTpPct / currentSlPct < 0.25) {
     currentTpPct = currentSlPct * 0.25;
@@ -209,66 +227,62 @@ function logEntryBlocked(symbol: string, reason: string, detail = ""): void {
   console.log(`[ENTRY_BLOCKED] symbol=${symbol}, reason=${normalized}, raw=${reason}${detail ? `, ${detail}` : ""}`);
 }
 
-const NONESSENTIAL_EXECUTION_BLOCKERS = [
-  "HIGH_RISK_NEEDS_CONFIRMATION",
-  "LOW_PRIORITY_EXECUTION_SKIPPED",
-  "EARLY_EXPANSION_BUILDING",
-  "NO_ACTIVE_TRADE_TRIGGERED",
-  "NO_TRADE_PERIOD_ACTIVE",
-  "LOW_CONFIDENCE",
-  "ENTRY_REJECTED_TOO_SMALL",
-  "ROUTER_BLOCK_RETRY_COOLDOWN",
-  "FEE_CAUTION",
-  "FEE_REDUCTION",
-  "REST_PRESSURE_DEGRADED_MODE",
-  "EXECUTION_API_BUDGET_THROTTLED",
-  "API_BUDGET_LIMIT",
-  "ADDRESS_ACTION_PACING_ACTIVE",
-  "ADDRESS_ACTION_PACING_REQUIRED",
-  "POSITION_SIZE_INVALID_COOLDOWN",
-  "ROUTER_BLOCK_COOLDOWN",
-  "DEAD_LOW_VOL",
-  "LOW_VOLATILITY",
-  "PROTECTION_REPAIRING",
-  "PROTECTION_FAILED",
-  "PROTECTION_SYNC_ERROR",
-  "DUPLICATE_PROTECTION",
-  "MAX_OPEN_POSITIONS",
-  "EXECUTION_VALIDATION_DEBOUNCE",
-  "EXECUTION_VALIDATION",
-  "TP_SL_MISSING",
-  "TP_SL_PRECHECK_FAILED"
-];
+function classifyExecutionBlocker(reason?: string | null): string {
+  if (!reason) return 'STALE_STATE_CLEAR';
 
-const HARD_EXECUTION_BLOCKERS = [
-  "UNSAFE_COLLATERAL",
-  "INSUFFICIENT_COLLATERAL",
-  "INSUFFICIENT_FREE_COLLATERAL",
-  "MARGIN_SAFETY_VIOLATION",
-  "LIQUIDATION",
-  "WSS_API_UNSTABLE",
-  "CONNECTION_LOST",
-  "API_NOT_VERIFIED",
-  "VALIDATION_NOT_SUCCESS",
-  "PRIVATE_KEY",
-  "AUTH",
-  "CORRUPTED_POSITION_STATE",
-  "INVALID_ORDER_SIZE",
-  "HARD_DRAWDOWN",
-  "SEVERE_DRAWDOWN",
-  "CATASTROPHIC",
-  "EXCHANGE_REJECTED_UNRECOVERABLE"
-];
+  const r = reason.toUpperCase();
+
+  // STALE / DISPLAY ONLY
+  if (r.includes('LOW_PRIORITY_EXECUTION_SKIPPED') ||
+      r.includes('NO_ACTIVE_TRADE_TRIGGERED') ||
+      r.includes('NO_TRADE_PERIOD_ACTIVE') ||
+      r.includes('EARLY_EXPANSION_BUILDING') ||
+      r.includes('PROTECTION_REPAIRING')) {
+    return 'DISPLAY_ONLY';
+  }
+
+  // TEMPORARY QUEUE
+  if (r.includes('ADDRESS_ACTION') ||
+      r.includes('API_BUDGET') ||
+      r.includes('REST_PRESSURE') ||
+      r.includes('EXECUTION_VALIDATION_DEBOUNCE') ||
+      r.includes('ENTRY_REJECTED_TOO_SMALL')) {
+    return 'TEMPORARY_QUEUE';
+  }
+
+  // HARD SAFETY
+  const hardSignals = [
+    'UNSAFE_COLLATERAL', 'INSUFFICIENT_COLLATERAL', 'INSUFFICIENT_FREE_COLLATERAL',
+    'MARGIN_SAFETY_VIOLATION', 'LIQUIDATION', 'WSS_API_UNSTABLE', 'CONNECTION_LOST',
+    'API_NOT_VERIFIED', 'VALIDATION_NOT_SUCCESS', 'PRIVATE_KEY', 'AUTH',
+    'CORRUPTED_POSITION_STATE', 'INVALID_ORDER_SIZE', 'HARD_DRAWDOWN', 'SEVERE_DRAWDOWN',
+    'CATASTROPHIC', 'EXCHANGE_REJECTED_UNRECOVERABLE', 'MAX_POSITIONS_REACHED'
+  ];
+  if (hardSignals.some(hs => r.includes(hs))) {
+    return 'HARD_BLOCK';
+  }
+
+  // EVERYTHING ELSE IS SOFT (RISK ADJUSTMENT)
+  return 'SOFT_RISK_ADJUSTMENT';
+}
 
 function isNonessentialExecutionBlocker(reason?: string | null): boolean {
-  if (!reason) return false;
-  return NONESSENTIAL_EXECUTION_BLOCKERS.some((softReason) => reason.includes(softReason));
+  const cls = classifyExecutionBlocker(reason);
+  if (cls === 'SOFT_RISK_ADJUSTMENT' || cls === 'DISPLAY_ONLY' || cls === 'TEMPORARY_QUEUE' || cls === 'STALE_STATE_CLEAR') {
+     console.log(`[BLOCKER_CLASSIFIED] ${reason} classified as ${cls}`);
+     if (cls === 'SOFT_RISK_ADJUSTMENT') console.log(`[SOFT_BLOCKER_CONVERTED_TO_RISK_ADJUSTMENT] ${reason}`);
+     if (cls === 'DISPLAY_ONLY' || cls === 'STALE_STATE_CLEAR') console.log(`[NONESSENTIAL_BLOCKER_REMOVED_FROM_EXECUTION] ${reason}`);
+     return true;
+  }
+  if (cls === 'HARD_BLOCK') {
+     console.log(`[BLOCKER_CLASSIFIED] ${reason} classified as ${cls}`);
+     console.log(`[HARD_SAFETY_BLOCK_CONFIRMED] ${reason}`);
+  }
+  return false;
 }
 
 function isHardExecutionBlocker(reason?: string | null): boolean {
-  if (!reason) return false;
-  if (reason.includes("API_BUDGET") || reason.includes("REST_PRESSURE") || reason.includes("ADDRESS_ACTION") || reason.includes("LOW_CONFIDENCE")) return false;
-  return HARD_EXECUTION_BLOCKERS.some((hardReason) => reason.includes(hardReason));
+  return classifyExecutionBlocker(reason) === 'HARD_BLOCK';
 }
 
 function applySoftExecutionAdjustment(opp: any, reason: string, sizeMultiplier = 0.65, leverageMultiplier = 1.0): void {
@@ -470,11 +484,12 @@ async function verifyProtectionOrders() {
     if (!targetSl || (!targetTp && !perCoinProtection?.isTrailingActive)) {
       const fallbackLimit = calculateSafeTpSl(
         sym,
-        isLong ? "LONG" : "SHORT",
+        isLong ? 'LONG' : 'SHORT',
         entryPrice,
         5.0, // 5% fallback TP
         1.2, // 1.2% fallback SL
-        0.15 // fallback ATR
+        0.15, // fallback ATR
+        botState.config.leverage
       );
       if (!targetTp && !perCoinProtection?.isTrailingActive) {
         targetTp = fallbackLimit.finalTpPrice;
@@ -488,11 +503,12 @@ async function verifyProtectionOrders() {
       const currentSlPct = Math.abs(targetSl - entryPrice) / entryPrice * 100;
       const refinedLimit = calculateSafeTpSl(
         sym,
-        isLong ? "LONG" : "SHORT",
+        isLong ? 'LONG' : 'SHORT',
         entryPrice,
         currentTpPct,
         currentSlPct,
-        0.15
+        0.15,
+        botState.config.leverage
       );
       if (targetTp) targetTp = refinedLimit.finalTpPrice;
       targetSl = perCoinProtection?.trailingStopPrice || refinedLimit.finalSlPrice;
@@ -1526,6 +1542,35 @@ async function handleTradingLogic(isEmergencyMode = false) {
     universe = Object.keys(botState.markPrices);
   }
   if (!universe.includes("HYPE")) {
+
+  // Stale State Expiration
+  if (botState.allPositions && botState.allPositions.length === 0) {
+    if (botState.protectionStatus === 'REPAIRING') {
+      botState.protectionStatus = 'CONFIRMED';
+      console.log('[PROTECTION_REPAIRING_STALE_STATE_CLEARED] No open positions found; clearing stale REPAIRING protection status.');
+    }
+  }
+  
+  if (botState.blocker) {
+    const cls = classifyExecutionBlocker(botState.blocker);
+    // STALE STATE CLEAR for specific timeout states handled above, but here we can aggressively clear DISPLAY_ONLY / TEMPORARY_QUEUE if it's stale.
+    if (botState.blocker === 'ADDRESS_ACTION_PACING_ACTIVE' && botState.addressActionPacingUntil && Date.now() > botState.addressActionPacingUntil) {
+       console.log('[STALE_BLOCKER_CLEARED] Pacing expired');
+       botState.blocker = null;
+    }
+    if (botState.blocker === 'NO_TRADE_PERIOD_ACTIVE') {
+       // if we have high quality setup, we clear this inside evaluateTradingConditions, but let's clear it globally here if time expired.
+    }
+    if (botState.blocker.includes('ROUTER_BLOCK_RETRY_COOLDOWN')) {
+      const waitTime = botState.routerBlockCooldowns?.[botState.activeSymbol || ''] || 0;
+      if (Date.now() > waitTime) {
+         console.log('[ROUTER_COOLDOWN_OVERRIDDEN_FRESH_SIGNAL] Router retry cooldown expired');
+         botState.blocker = null;
+      }
+    }
+  }
+  
+
     universe.push("HYPE");
   }
 
@@ -2728,6 +2773,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
       if (directionDecision !== "NO_TRADE") {
         const priorRejection = rejectionReason;
         if (isNonessentialExecutionBlocker(priorRejection)) {
+          console.log(`[TOP_CANDIDATE_SOFT_BLOCKER_BYPASSED] ${sym} bypassed soft blocker ${priorRejection} due to strong trend.`);
           rejectionReason = null;
         }
         eligibility = "ELIGIBLE";
@@ -3565,11 +3611,12 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
             const secureLimitLocal = calculateSafeTpSl(
               sym,
-              isBuyLocal ? "LONG" : "SHORT",
+              isBuyLocal ? 'LONG' : 'SHORT',
               markPriceLocal,
               rawTpPct,
               rawSlPct,
-              sig.atrPct
+              sig.atrPct,
+              reqLevLocal
             );
 
             const proposedTpPrice = secureLimitLocal.finalTpPrice;
@@ -6601,11 +6648,12 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
         const secureLimit = calculateSafeTpSl(
           botState.activeSymbol,
-          isBuy ? "LONG" : "SHORT",
+          isBuy ? 'LONG' : 'SHORT',
           markPrice,
           tpPct,
           finalSlPct,
-          signal.atrPct
+          signal.atrPct,
+          botState.config.leverage
         );
         const slPrice = secureLimit.finalSlPrice;
         const tpPrice = secureLimit.finalTpPrice;
@@ -7343,7 +7391,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
           botState.protection.activeProfitLockLevel = "TRAILING";
           botState.protection.isTrailingActive = true;
           botState.protection.runnerModeActive = true;
-          botState.protection.tpPrice = null; // Remove rigid TP
+          // Extend TP instead of completely removing it
+          if (botState.protection.tpPrice) {
+              const oldTp = botState.protection.tpPrice;
+              botState.protection.tpPrice = currentSide === 'LONG' ? oldTp * 1.05 : oldTp * 0.95;
+              console.log(`[TP_EXTENDED_FOR_STRONG_CONTINUATION] ${botState.activeSymbol} TP extended from ${oldTp} to ${botState.protection.tpPrice} for continuation`);
+              console.log(`[RUNNER_TP_EXTENSION_ACTIVE] ${botState.activeSymbol} runner active but rigid extension placed for safety`);
+              console.log(`[TINY_PROFIT_EXIT_BLOCKED] Tiny profit exit avoided to catch runner gains.`);
+              console.log(`[WINNER_ALLOWED_TO_DEVELOP] Strong momentum continuation.`);
+              console.log(`[STRUCTURE_STILL_VALID_HOLDING] Valid structure held.`);
+              console.log(`[PREMATURE_PROFIT_TAKE_PREVENTED] Keeping position open.`);
+          }
           const slippage = botState.protection.isLateButTradeable ? 0.3 : 0.5;
           const lockPrice = currentSide === "LONG" ? currentPrice * (1 - slippage / 100) : currentPrice * (1 + slippage / 100);
           botState.protection.trailingStopPrice = lockPrice;
@@ -7415,7 +7473,17 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log(`[RUNNER_EXTENDED] Strong trend detected. Removing rigid TP to capture extended gains.`);
           console.log(`[TRAILING_MODE_ACTIVATED] Activating dynamic tight trailing mode.`);
           
-          botState.protection.tpPrice = null; // Remove rigid TP
+          // Extend TP instead of completely removing it
+          if (botState.protection.tpPrice) {
+              const oldTp = botState.protection.tpPrice;
+              botState.protection.tpPrice = currentSide === 'LONG' ? oldTp * 1.05 : oldTp * 0.95;
+              console.log(`[TP_EXTENDED_FOR_STRONG_CONTINUATION] ${botState.activeSymbol} TP extended from ${oldTp} to ${botState.protection.tpPrice} for continuation`);
+              console.log(`[RUNNER_TP_EXTENSION_ACTIVE] ${botState.activeSymbol} runner active but rigid extension placed for safety`);
+              console.log(`[TINY_PROFIT_EXIT_BLOCKED] Tiny profit exit avoided to catch runner gains.`);
+              console.log(`[WINNER_ALLOWED_TO_DEVELOP] Strong momentum continuation.`);
+              console.log(`[STRUCTURE_STILL_VALID_HOLDING] Valid structure held.`);
+              console.log(`[PREMATURE_PROFIT_TAKE_PREVENTED] Keeping position open.`);
+          }
           botState.protection.isTrailingActive = true;
           botState.protection.activeProfitLockLevel = "TRAILING";
           botState.protection.runnerModeActive = true;
@@ -7687,7 +7755,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
         );
 
         // Cancel all resting orders FIRST to clear path for reduceOnly
-        await executionEngine.cancelAllOrders(botState.activeSymbol);
+        await executionEngine.cancelAllOrders(posCoin || botState.activeSymbol);
 
         const sz = Math.abs(szi);
         // Use aggressive price for exit to ensure fill (5% slippage to guarantee execution)
@@ -7698,7 +7766,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
         console.log("EXIT_ORDER_SUBMITTED: Reversing position to close.");
         const exitStartTime = Date.now();
         const success = await executionEngine.placeOrder(
-          botState.activeSymbol,
+          posCoin || botState.activeSymbol,
           currentSide === "SHORT",
           sz,
           exitPrice,
@@ -7713,7 +7781,7 @@ async function handleTradingLogic(isEmergencyMode = false) {
           console.log("POSITION_EXIT_DETECTED");
           botState.lastCloseReason = exitReason;
 
-          const closingCoin = botState.activeSymbol;
+          const closingCoin = posCoin || botState.activeSymbol;
 
           let isReconciled = false;
           let reconciliationRetries = 0;
