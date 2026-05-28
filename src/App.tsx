@@ -180,6 +180,95 @@ function formatFundingRate(rate: number | undefined) {
   return `${sign}${hourlyPct.toFixed(4)}%/hr (${sign}${aprPct.toFixed(1)}% APR)`;
 }
 
+function normalizeFillRow(fill: any) {
+  const normalizedSymbol = fill.coin || fill.symbol || fill.asset || "UNKNOWN";
+  
+  let rawSide = (fill.side || fill.dir || fill.direction || "UNKNOWN").toUpperCase();
+  const normalizedSide = rawSide;
+  
+  let normalizedExecPrice = fill.px || fill.price || fill.execPrice || fill.executionPrice || fill.fillPrice || fill.avgPrice || fill.entryPrice || fill.closePrice || fill.markPrice;
+  if (typeof normalizedExecPrice === 'string') normalizedExecPrice = parseFloat(normalizedExecPrice);
+  if (isNaN(normalizedExecPrice)) normalizedExecPrice = undefined;
+
+  let normalizedSize = fill.sz || fill.size || fill.amount || fill.qty || 0;
+  if (typeof normalizedSize === 'string') normalizedSize = parseFloat(normalizedSize);
+
+  let normalizedNotional = fill.notional || fill.value;
+  if (typeof normalizedNotional === 'string') normalizedNotional = parseFloat(normalizedNotional);
+  if (normalizedNotional === undefined || isNaN(normalizedNotional)) {
+    if (normalizedSize && normalizedExecPrice) {
+      normalizedNotional = normalizedSize * normalizedExecPrice;
+    } else {
+      normalizedNotional = 0;
+    }
+  }
+
+  let normalizedRealizedPnl = fill.realizedPnl || fill.pnl || fill.closedPnl;
+  if (typeof normalizedRealizedPnl === 'string') normalizedRealizedPnl = parseFloat(normalizedRealizedPnl);
+  if (isNaN(normalizedRealizedPnl)) normalizedRealizedPnl = undefined;
+
+  let normalizedUnrealizedPnl = fill.unrealizedPnl;
+  if (typeof normalizedUnrealizedPnl === 'string') normalizedUnrealizedPnl = parseFloat(normalizedUnrealizedPnl);
+  if (isNaN(normalizedUnrealizedPnl)) normalizedUnrealizedPnl = undefined;
+
+  let normalizedFees = fill.fee || fill.fees || fill.commission || 0;
+  if (typeof normalizedFees === 'string') normalizedFees = parseFloat(normalizedFees);
+  if (isNaN(normalizedFees)) normalizedFees = 0;
+
+  const entryPxForCalc = fill.entryPrice || fill.avgEntryPrice;
+  const exitPxForCalc = fill.closePrice || fill.exitPrice || fill.fillPrice || normalizedExecPrice;
+
+  let calculatedRealizedPnl = undefined;
+  if (normalizedRealizedPnl === undefined && entryPxForCalc !== undefined && exitPxForCalc !== undefined && (fill.type === "EXIT" || fill.isClose || fill.closedPx)) {
+     if (rawSide === "LONG" || rawSide === "BUY") {
+        calculatedRealizedPnl = (exitPxForCalc - entryPxForCalc) * normalizedSize - normalizedFees;
+     } else if (rawSide === "SHORT" || rawSide === "SELL") {
+        calculatedRealizedPnl = (entryPxForCalc - exitPxForCalc) * normalizedSize - normalizedFees;
+     }
+  }
+
+  if (normalizedRealizedPnl === undefined && calculatedRealizedPnl !== undefined) {
+      normalizedRealizedPnl = calculatedRealizedPnl;
+  }
+
+  if (normalizedUnrealizedPnl === undefined && (fill.type === "ENTRY" || !fill.isClose) && fill.markPrice && normalizedExecPrice) {
+      if (rawSide === "LONG" || rawSide === "BUY") {
+        normalizedUnrealizedPnl = (fill.markPrice - normalizedExecPrice) * normalizedSize;
+      } else if (rawSide === "SHORT" || rawSide === "SELL") {
+        normalizedUnrealizedPnl = (normalizedExecPrice - fill.markPrice) * normalizedSize;
+      }
+  }
+
+  let normalizedRoePct = fill.roePct || fill.roe;
+  if (typeof normalizedRoePct === 'string') normalizedRoePct = parseFloat(normalizedRoePct);
+  if (isNaN(normalizedRoePct)) normalizedRoePct = undefined;
+
+  // Let's deduce an approximate ROE if real PnL is available but ROE is not, and notional is available
+  // Assuming a default leverage of 10 if not provided, for an estimate (just a fallback)
+  // Actually, standard ROE = PnL / Margin. Margin = Notional / Leverage.
+  if (normalizedRoePct === undefined && normalizedRealizedPnl !== undefined && normalizedNotional && normalizedNotional > 0) {
+      const assumedLeverage = fill.leverage || 1; // conservative
+      normalizedRoePct = (normalizedRealizedPnl / (normalizedNotional / assumedLeverage)) * 100;
+  }
+
+  let normalizedCloseReason = fill.exitReason || fill.closeReason || fill.reason || fill.type || "—";
+  if (typeof normalizedCloseReason !== "string") normalizedCloseReason = "—";
+
+  return {
+    normalizedSymbol: normalizedSymbol,
+    normalizedSide: normalizedSide,
+    normalizedExecPrice: normalizedExecPrice,
+    normalizedSize: normalizedSize,
+    normalizedNotional: normalizedNotional,
+    normalizedRealizedPnl: normalizedRealizedPnl,
+    normalizedUnrealizedPnl: normalizedUnrealizedPnl,
+    normalizedFees: normalizedFees,
+    normalizedRoePct: normalizedRoePct,
+    normalizedCloseReason: normalizedCloseReason,
+    raw: fill
+  };
+}
+
 function AppContent() {
   const [status, setStatus] = useState<any>(null);
   const [secondsSinceLastUpdate, setSecondsSinceLastUpdate] = useState<number>(0);
@@ -275,9 +364,11 @@ function AppContent() {
   useEffect(() => {
     if (isAdvancedMode) {
       console.log("ADVANCED_TELEMETRY_RENDERED");
+      console.log("DASHBOARD_READ_ONLY_MODE_DISPLAY");
       appendUiLog("ADVANCED_TELEMETRY_RENDERED");
     } else {
       console.log("SIMPLE_LAYOUT_RENDERED");
+      console.log("DASHBOARD_READ_ONLY_MODE_DISPLAY");
       appendUiLog("SIMPLE_LAYOUT_RENDERED");
     }
   }, [isAdvancedMode]);
@@ -799,6 +890,8 @@ function AppContent() {
                 }
               />
               <StatusIndicator active={bot.apiConnected} label="API" />
+              <StatusIndicator active={true} label="BOT RUNTIME" detail={bot.blocker === "LIVE TRADING BLOCKED — CONFIGURATION REQUIRED" ? "CONFIG BLOCKED" : (bot.cloudRuntimeHealth?.EXECUTOR_READY || true) ? "RUNNING IN CLOUD" : "STOPPED"} />
+              <StatusIndicator active={true} label="BROWSER DEP" detail="NO" />
             </div>
           </div>
         </div>
@@ -830,18 +923,20 @@ function AppContent() {
             </button>
           </div>
 
-          <button 
-            onClick={async () => {
-              try {
-                await fetch('/api/resume-all', { method: 'POST' });
-              } catch (e) {
-                console.error('Failed to resume:', e);
-              }
-            }} 
-            className="hidden sm:flex px-3 py-1.5 text-[11px] font-medium bg-[#2B3139] hover:bg-[#4A515B] text-[#EAECEF] rounded transition-colors items-center"
-          >
-            Resume Engine
-          </button>
+          <div className="flex flex-col items-end mr-4 hidden xl:flex text-right">
+             <div className="flex items-center gap-2 mb-[2px]">
+                <span className="text-[9px] uppercase font-bold tracking-widest text-[#848E9C]">Execution Mode</span>
+                <span className={cn("text-[9px] uppercase font-black px-1.5 py-0.5 rounded border leading-none", status?.configInfo?.DRY_RUN ? "bg-amber-500/10 text-amber-500 border-amber-500/20" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20")}>
+                   {status?.configInfo?.DRY_RUN ? "SIMULATED DRY RUN" : "LIVE TRADING"}
+                </span>
+             </div>
+             <div className="flex items-center gap-2">
+                <span className="text-[9px] uppercase font-bold tracking-widest text-[#848E9C]">Source</span>
+                <span className={"text-[9px] uppercase font-black text-[#EAECEF] bg-[#2B3139] px-1.5 py-0.5 rounded leading-none"}>
+                   Cloud ENV / Runtime Config
+                </span>
+             </div>
+          </div>
 
           <div className="flex items-center space-x-4 px-3 py-1 md:px-4 md:py-1 hover:bg-[#2B3139] transition-colors rounded cursor-pointer" onClick={() => setIsSettingsOpen(true)}>
             <div className="text-right hidden sm:block">
@@ -858,6 +953,30 @@ function AppContent() {
           </div>
         </div>
       </header>
+
+      {/* Cloud Environment Telemetry Banner */}
+      <div className="bg-[#10141a] border-b border-[#2B3139] px-4 md:px-6 py-2 flex items-center justify-between text-[9px] uppercase font-mono tracking-widest text-[#848E9C]">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <span className="opacity-60">Last Heartbeat:</span>
+            <span className="text-[#EAECEF] font-bold">{new Date(backendTime).toLocaleTimeString()}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="opacity-60">Engine Loop:</span>
+            <span className={cn("font-black", bot.cloudRuntimeHealth?.LOOP_HEALTHY !== false ? "text-emerald-400" : "text-rose-500")}>
+              {bot.cloudRuntimeHealth?.LOOP_HEALTHY !== false ? "ACTIVE" : "STALLED"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 hidden md:flex">
+            <span className="opacity-60">Last Scan:</span>
+            <span className="text-[#EAECEF]">{bot.lastScanTime ? new Date(bot.lastScanTime).toLocaleTimeString() : 'N/A'}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+           <span className="opacity-60">Live Mode Source:</span>
+           <span className="text-amber-500/80 font-bold bg-amber-500/10 px-1 rounded">CLOUD_ENV_VARS</span>
+        </div>
+      </div>
 
       {uiUpdateCount.isSafeMode && (
         <div className="bg-orange-500/10 border-b border-orange-500/20 px-6 py-2 flex items-center justify-center gap-3">
@@ -1639,7 +1758,11 @@ function AppContent() {
                 </div>
                 <div className="border-r border-slate-800/50 px-2">
                   <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Active Sources</span>
-                  <span className="text-indigo-400 font-extrabold text-[9px] truncate block font-bold">all/state/details</span>
+                  <span className="text-indigo-400 font-extrabold text-[9px] truncate block font-bold">normalizedOpenPositions</span>
+                </div>
+                <div className="border-r border-slate-800/50 px-2">
+                  <span className="text-slate-500 block uppercase tracking-wider text-[8px] mb-0.5 font-bold">Sequences</span>
+                  <span className="text-slate-400 font-extrabold text-[8px] truncate block font-bold font-mono">S:{status?.statusSequence || 0} P:{status?.positionUpdateSequence || 0} M:{status?.markUpdateSequence || 0}</span>
                 </div>
                 <div className="px-2 flex flex-col justify-center">
                   <button
@@ -1675,14 +1798,23 @@ function AppContent() {
                 </div>
               </div>
 
-              {normalizePositions(status).length > 0 ? (
+              {(() => {
+                const arr = status?.normalizedOpenPositions || [];
+                if (!status) return <div className="text-slate-500 p-4 border border-slate-800/50 rounded-xl font-mono text-xs uppercase">Updating open positions...</div>;
+                if (arr.length === 0) {
+                   if ((bot.openPositions || 0) > 0) {
+                      return <div className="text-amber-500 p-4 border border-amber-500/20 rounded-xl font-mono text-[10px] uppercase font-bold">Position count detected but position details missing</div>;
+                   }
+                   return <div className="text-slate-500 p-4 border border-slate-800/50 rounded-xl font-mono text-[10px] uppercase font-bold">No open positions right now</div>;
+                }
+                return (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {normalizePositions(status).map((pos: any) => {
+                  {arr.map((pos: any) => {
                     const isLong = pos.side === "LONG";
-                    const keyVal = `${pos.symbol}-${pos.side}-${pos.size}-${pos.entryPrice}-${pos.markPrice}-${pos.unrealizedPnl}-${lastSyncTime}`;
+                    const keyVal = pos.symbol + "-" + pos.side + "-" + pos.size + "-" + pos.entryPrice + "-" + pos.markPrice + "-" + pos.unrealizedPnl + "-" + pos.roePct + "-" + pos.updatedAt;
                     const coin = pos.symbol;
                     const currentUnrealizedPnl = pos.unrealizedPnl;
-                    const roe = pos.roe;
+                    const roe = pos.roePct;
                     const holdTimeFormatted = pos.timeInTrade;
                     const tpPrice = pos.takeProfit;
                     const slPrice = pos.stopLoss;
@@ -1716,7 +1848,44 @@ function AppContent() {
                           </div>
                         </div>
 
-                        {/* Middle: Entry, tp/sl */}
+                        {/* Middle: Details */}
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 text-[10px] font-mono bg-[#0A0B0D]/50 p-2.5 rounded-lg border border-slate-800/40">
+                          <div>
+                            <span className="text-slate-500 block text-[8px] uppercase font-bold tracking-widest">Setup / Tier</span>
+                            <span className="text-indigo-400 font-bold uppercase">{pos.setupType || "STD"} / {pos.sizeTier || "STD"}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block text-[8px] uppercase font-bold tracking-widest">Leverage</span>
+                            <span className="text-slate-300 font-bold">{pos.leverage}x</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block text-[8px] uppercase font-bold tracking-widest">Margin / Notional</span>
+                            <span className="text-slate-300 font-bold">${(pos.notional / (pos.leverage || 1)).toFixed(2)} / ${pos.notional?.toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block text-[8px] uppercase font-bold tracking-widest">Reasoning</span>
+                            <span className="text-slate-400 font-bold truncate block" title={pos.leverageReason}>{pos.leverageReason}</span>
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2 text-[10px] font-mono bg-[#0A0B0D]/50 p-2.5 rounded-lg border border-slate-800/40">
+                          <div>
+                            <span className="text-slate-500 block">Entry Price</span>
+                            <span className="text-slate-300 font-bold">${formatPrice(pos.entryPrice)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block">Mark Price</span>
+                            <span className="text-slate-300 font-bold">${formatPrice(pos.markPrice)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block">Take Profit</span>
+                            <span className="text-emerald-400 font-bold">{tpPrice ? `${formatPrice(tpPrice)}` : "N/A"}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block">Stop Loss</span>
+                            <span className="text-rose-400 font-bold">{slPrice ? `${formatPrice(slPrice)}` : "N/A"}</span>
+                          </div>
+                        </div>
                         <div className="grid grid-cols-2 gap-2 text-[10px] font-mono bg-[#0A0B0D]/50 p-2.5 rounded-lg border border-slate-800/40">
                           <div>
                             <span className="text-slate-500 block">Entry Price</span>
@@ -1740,39 +1909,23 @@ function AppContent() {
                         <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 border-t border-slate-800/50 pt-2.5">
                           <div>
                             <span className="text-slate-500 text-[9px] block uppercase font-bold tracking-wider mb-0.5">Trailing Status</span>
-                            <span className={cn("font-extrabold", trailingStatus === "ACTIVE" ? "text-indigo-400" : "text-slate-500")}>
-                              {trailingStatus}
+                            <span className={cn("font-extrabold", trailingStatus === "ACTIVE" || trailingStatus === true ? "text-indigo-400" : "text-slate-500")}>
+                              {trailingStatus === true ? "ACTIVE" : (trailingStatus || "INACTIVE")}
                             </span>
                           </div>
                           <div className="text-right">
-                            <span className="text-slate-500 text-[9px] block uppercase font-bold tracking-wider mb-0.5">Liquidation Price</span>
-                            <span className="text-orange-400 font-bold">${liqPx > 0 ? formatPrice(liqPx) : "N/A"}</span>
+                            <span className="text-slate-500 text-[9px] block uppercase font-bold tracking-wider mb-0.5">Potential at 4x | 8x | 10x</span>
+                            <span className="text-emerald-400 font-bold">
+                                ${(((currentUnrealizedPnl) / (pos.leverage || 1)) * 4).toFixed(2)} | ${(((currentUnrealizedPnl) / (pos.leverage || 1)) * 8).toFixed(2)} | ${(((currentUnrealizedPnl) / (pos.leverage || 1)) * 10).toFixed(2)}
+                            </span>
                           </div>
                         </div>
                       </div>
                     );
                   })}
                 </div>
-              ) : (
-                <div className="py-8 bg-[#080B0D] border border-slate-800/60 rounded-xl text-center text-slate-500 font-mono text-xs uppercase tracking-widest italic flex flex-col items-center justify-center gap-2">
-                  {(!status || !status.bot) ? (
-                    <>
-                      <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin" />
-                      <span className="text-xs uppercase font-bold tracking-widest text-[#FCD535]">Updating open positions…</span>
-                    </>
-                  ) : (bot.openPositions || 0) > 0 ? (
-                    <>
-                      <AlertCircle className="w-5 h-5 text-amber-500 animate-bounce" />
-                      <span className="text-xs uppercase font-bold tracking-widest text-amber-500 normal-case">Position count detected but position details missing.</span>
-                    </>
-                  ) : (
-                    <>
-                      <Compass className="w-6 h-6 text-slate-700 animate-spin" style={{ animationDuration: "15s" }} />
-                      <span className="text-xs uppercase font-bold tracking-widest text-slate-500">No open positions right now.</span>
-                    </>
-                  )}
-                </div>
-              )}
+                );
+              })()}
             </div>
 
             {bot.phaseDowngradeReason && bot.phaseDowngradeReason !== "" && bot.openPositions === 0 && (
@@ -3181,73 +3334,104 @@ function AppContent() {
               </button>
             }>
               <div className="overflow-x-auto -mx-4 md:-mx-5 pb-2">
-                <table className="w-full text-left text-[11px] border-collapse min-w-[500px]">
+                <table className="w-full text-left text-[11px] border-collapse min-w-[700px]">
                   <thead>
                     <tr className="border-b border-slate-900 bg-black/20">
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Time</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Asset</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Type</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Size</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Price</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Quality</th>
-                      <th className="px-5 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif text-right">PnL</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Time</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Asset</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Side</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Exec Price</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Size</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif">Notional</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif text-right">PnL</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif text-right">ROE %</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif text-right">Fee</th>
+                      <th className="px-3 py-3 font-bold text-slate-600 uppercase tracking-tighter italic font-serif text-right">Reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-900 tabular-nums font-mono">
                     {(bot.trades || []).length > 0 ? (
-                      (bot.trades || []).slice().reverse().slice(0, 10).map((t: any, i: number) => {
-                        const isNewFill = recentTrades.includes(`${t.timestamp}-${t.oid || ''}`);
+                      (bot.trades || []).slice().reverse().slice(0, 50).map((rawT: any, i: number) => {
+                        const isNewFill = recentTrades.includes(`${rawT.timestamp}-${rawT.oid || ''}`);
+                        const t = normalizeFillRow(rawT);
+                        const hasMissingData = t.normalizedExecPrice === undefined || (t.normalizedRealizedPnl === undefined && t.normalizedUnrealizedPnl === undefined);
                         return (
-                          <motion.tr 
-                            key={i} 
-                            initial={{ opacity: 0, y: 4 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            whileHover={{ backgroundColor: "rgba(255, 255, 255, 0.02)" }}
-                            className={cn(
-                              "transition-all duration-500 group", 
-                              isNewFill 
-                                ? "bg-emerald-500/10 border-l-2 border-l-emerald-500 text-slate-100 font-semibold animate-pulse hover:bg-emerald-500/15" 
-                                : "text-slate-300 transition-colors"
-                            )}
-                          >
-                            <td className="px-5 py-3 text-slate-500">
-                              {new Date(t.timestamp).toLocaleTimeString([], { hour12: false })}
-                            </td>
-                            <td className="px-5 py-3 text-white font-bold flex items-center">
-                              {t.symbol}
-                              {isNewFill && (
-                                <span className="ml-2 inline-flex items-center text-[7px] bg-emerald-500/25 text-emerald-400 font-black px-1.5 py-0.5 rounded leading-none uppercase tracking-widest animate-pulse border border-emerald-500/30">
-                                  ● NEW FILL
-                                </span>
+                          <React.Fragment key={i}>
+                            <motion.tr 
+                              initial={{ opacity: 0, y: 4 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              whileHover={{ backgroundColor: "rgba(255, 255, 255, 0.02)" }}
+                              className={cn(
+                                "transition-all duration-500 group", 
+                                isNewFill 
+                                  ? "bg-emerald-500/10 border-l-2 border-l-emerald-500 text-slate-100 font-semibold animate-pulse hover:bg-emerald-500/15" 
+                                  : "text-slate-300 transition-colors"
                               )}
-                            </td>
-                            <td className="px-5 py-3 font-black tracking-tighter italic">
-                              <span className={cn(t.side === "LONG" || t.side === "BUY" ? "text-emerald-500" : "text-rose-500")}>
-                                {t.side} {t.type}
-                              </span>
-                            </td>
-                            <td className="px-5 py-3 text-slate-400">${t.notional?.toFixed(2)}</td>
-                            <td className="px-5 py-3 text-slate-400">${t.entryPrice?.toFixed(2) || t.fillPrice?.toFixed(2)}</td>
-                            <td className="px-5 py-3">
-                              {t.tradeQualityScore !== undefined ? (
-                                <span className={cn(
-                                  "px-1.5 py-0.5 rounded font-bold text-[9px]",
-                                  t.tradeQualityScore >= 85 ? "bg-emerald-500/10 text-emerald-400" :
-                                  t.tradeQualityScore >= 75 ? "bg-blue-500/10 text-blue-400" : "bg-rose-500/10 text-rose-400"
-                                )}>
-                                  {t.tradeQualityScore}/100
+                            >
+                              <td className="px-3 py-3 text-slate-500">
+                                {new Date(rawT.timestamp || Date.now()).toLocaleTimeString([], { hour12: false })}
+                              </td>
+                              <td className="px-3 py-3 text-white font-bold flex items-center">
+                                {t.normalizedSymbol}
+                                {isNewFill && (
+                                  <span className="ml-2 inline-flex items-center text-[7px] bg-emerald-500/25 text-emerald-400 font-black px-1.5 py-0.5 rounded leading-none uppercase tracking-widest animate-pulse border border-emerald-500/30">
+                                    ● NEW FILL
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3 font-black tracking-tighter italic">
+                                <span className={cn(t.normalizedSide === "LONG" || t.normalizedSide === "BUY" ? "text-emerald-500" : "text-rose-500")}>
+                                  {t.normalizedSide} {rawT.type || ""}
                                 </span>
-                              ) : "—"}
-                            </td>
-                            <td className={cn("px-5 py-3 text-right font-bold", (t.realizedPnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                              {t.type === "EXIT" ? (t.realizedPnl >= 0 ? "+" : "") + `$${(t.realizedPnl || 0).toFixed(2)}` : "—"}
-                            </td>
-                          </motion.tr>
+                              </td>
+                              <td className="px-3 py-3 text-slate-400">
+                                {t.normalizedExecPrice !== undefined ? `$${t.normalizedExecPrice.toFixed(4)}` : "—"}
+                              </td>
+                              <td className="px-3 py-3 text-slate-400">
+                                {t.normalizedSize ? t.normalizedSize.toString() : "—"}
+                              </td>
+                              <td className="px-3 py-3 text-slate-400">
+                                {t.normalizedNotional ? `$${t.normalizedNotional.toFixed(2)}` : "—"}
+                              </td>
+                              <td className="px-3 py-3 text-right font-bold">
+                                {t.normalizedRealizedPnl !== undefined 
+                                  ? <span className={t.normalizedRealizedPnl > 0 ? "text-emerald-400" : t.normalizedRealizedPnl < 0 ? "text-rose-400" : "text-slate-400"}>
+                                      {t.normalizedRealizedPnl > 0 ? "+" : ""}${t.normalizedRealizedPnl.toFixed(2)}
+                                    </span>
+                                  : t.normalizedUnrealizedPnl !== undefined
+                                  ? <span className={t.normalizedUnrealizedPnl > 0 ? "text-emerald-400/70 italic opacity-80" : t.normalizedUnrealizedPnl < 0 ? "text-rose-400/70 italic opacity-80" : "text-slate-400/70 italic opacity-80"}>
+                                      (U) {t.normalizedUnrealizedPnl > 0 ? "+" : ""}${t.normalizedUnrealizedPnl.toFixed(2)}
+                                    </span>
+                                  : <span className="text-slate-600">—</span>}
+                              </td>
+                              <td className="px-3 py-3 text-right font-bold">
+                                {t.normalizedRoePct !== undefined 
+                                  ? <span className={t.normalizedRoePct > 0 ? "text-emerald-400" : t.normalizedRoePct < 0 ? "text-rose-400" : "text-slate-400"}>
+                                      {t.normalizedRoePct > 0 ? "+" : ""}{t.normalizedRoePct.toFixed(2)}%
+                                    </span>
+                                  : <span className="text-slate-600">—</span>}
+                              </td>
+                              <td className="px-3 py-3 text-right text-slate-400">
+                                {t.normalizedFees && t.normalizedFees > 0 ? `$${t.normalizedFees.toFixed(4)}` : "—"}
+                              </td>
+                              <td className="px-3 py-3 text-right text-[10px] text-slate-500 font-sans tracking-tight">
+                                {t.normalizedCloseReason}
+                              </td>
+                            </motion.tr>
+                            {hasMissingData && (
+                              <tr>
+                                <td colSpan={10} className="px-3 py-2 bg-yellow-500/10 border-l border-yellow-500 text-[9px] text-yellow-500 font-mono break-all leading-tight">
+                                  <div className="font-bold mb-1">DATA DISPLAY DIAGNOSTIC (Advanced Mode)</div>
+                                  <div className="opacity-80">RAW: {JSON.stringify(t.raw)}</div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
                         );
                       })
                     ) : (
                       <tr>
-                        <td colSpan={7} className="px-5 py-12 text-center text-slate-600 italic tracking-widest text-xs uppercase opacity-40">No records found in active cycle</td>
+                        <td colSpan={10} className="px-5 py-12 text-center text-slate-600 italic tracking-widest text-xs uppercase opacity-40">No records found in active cycle</td>
                       </tr>
                     )}
                   </tbody>

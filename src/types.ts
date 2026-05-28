@@ -219,7 +219,8 @@ export interface BotState {
   trendStrengthHistory?: number[];
   expectedDirectionHistory?: string[];
   chopRecoveryActive?: boolean;
-  entryOrdersContext?: Record<string, { symbol: string, side: string, size: number, px: number, confidence: number, regime: string, reason: string, ts: number }>;
+  entryOrdersContext?: Record<string, any>;
+  positionMetadata?: Record<string, any>;
   protection: {
     tpPrice: number | null;
     slPrice: number | null;

@@ -21,13 +21,33 @@ async function startServer() {
   app.get("/api/health", (req, res) => {
     res.status(200).json({ status: "ok" });
   });
-
-    app.get("/api/status", (req, res) => {
+  app.get("/api/status", (req, res) => {
     // Prevent any middleware, browser or proxy cache
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
     res.setHeader("Connection", "close");
+
+    const globalObj = global as any;
+    globalObj.statusSequence = (globalObj.statusSequence || 0) + 1;
+    globalObj.positionUpdateSequence = (globalObj.positionUpdateSequence || 0);
+    globalObj.markUpdateSequence = (globalObj.markUpdateSequence || 0);
+    globalObj.lastPositionsRaw = globalObj.lastPositionsRaw || '';
+    globalObj.lastMarkPxRaw = globalObj.lastMarkPxRaw || '';
+
+    const currentPositions = botState.allPositions || [];
+    const currentPositionsRaw = JSON.stringify(currentPositions);
+    if (globalObj.lastPositionsRaw !== currentPositionsRaw) {
+        globalObj.positionUpdateSequence++;
+        globalObj.lastPositionsRaw = currentPositionsRaw;
+    }
+    
+    const markPxRaw = String(botState.markPrice);
+    if (globalObj.lastMarkPxRaw !== markPxRaw) {
+        globalObj.markUpdateSequence++;
+        globalObj.lastMarkPxRaw = markPxRaw;
+    }
 
     const freeCollateral =
       botState.freeCollateralPct !== undefined
@@ -36,11 +56,68 @@ async function startServer() {
           ? (botState.availableMargin / botState.accountEquity) * 100
           : 100;
 
-    const currentPositions = botState.allPositions || [];
+    const normalizedOpenPositions = currentPositions.map((pos: any) => {
+         const coin = pos.coin || botState.activeSymbol;
+         const entryPx = parseFloat(pos.entryPx || '0');
+         const szNum = parseFloat(pos.szi || '0');
+         const side = szNum > 0 ? 'LONG' : (szNum < 0 ? 'SHORT' : 'NONE');
+         const markPx = (botState.markPrices && coin ? botState.markPrices[coin] : null) || botState.markPrice || entryPx;
+         const absSz = Math.abs(szNum);
+         
+         let rPnL = parseFloat(pos.unrealizedPnl || '0');
+         if (rPnL === 0 && entryPx > 0 && absSz > 0) {
+              const diff = side === 'LONG' ? (markPx - entryPx) : (entryPx - markPx);
+              rPnL = diff * absSz;
+         }
+         
+         const roePct = (parseFloat(pos.returnOnEquity || '0') * 100) || (entryPx > 0 && rPnL ? (rPnL / ((absSz*entryPx) / (botState.config?.leverage || 10))) * 100 : 0);
+         
+         const prot = (botState as any).protectionByCoin?.[coin] || botState.protection || {};
+         const meta = botState.positionMetadata?.[coin] || {};
+         
+         let rawLev = pos.leverage;
+         if (rawLev && typeof rawLev === "object" && rawLev.value) rawLev = rawLev.value;
+         const posLeverage = parseFloat(rawLev) || botState.config?.leverage || 10;
+         
+         return {
+             symbol: coin,
+             side: side,
+             size: absSz,
+             notional: absSz * markPx,
+             leverage: posLeverage,
+             entryPrice: entryPx,
+             markPrice: markPx,
+             unrealizedPnl: rPnL,
+             roePct: roePct,
+             takeProfit: prot.tpPrice || null,
+             stopLoss: prot.slPrice || null,
+             dynamicStopLoss: prot.dynamicSlPrice || prot.slPrice || null,
+             trailingStatus: prot.isTrailingActive || false,
+             runnerStatus: prot.runnerModeActive || false,
+             profitLockStage: prot.activeProfitLockLevel || 'NONE',
+             sizeTier: meta.sizeTier || 'STANDARD',
+             setupType: meta.setupType || 'STANDARD',
+             leverageReason: meta.leverageReason || 'Default',
+             sizingReasons: meta.sizingReasons || [],
+             timeInTrade: botState.lastEntryTimestamp ? (Date.now() - botState.lastEntryTimestamp) : 0,
+             liquidationPrice: parseFloat(pos.liquidationPrice || '0') || botState.liquidationPrice || null,
+             updatedAt: Date.now()
+         };
+    });
 
     res.json({
       server: "running",
       serverTime: Date.now(),
+      statusSequence: globalObj.statusSequence,
+      positionUpdateSequence: globalObj.positionUpdateSequence,
+      markUpdateSequence: globalObj.markUpdateSequence,
+      normalizedOpenPositions,
+      liveModeDiagnostics: botState.liveModeDiagnostics,
+      configInfo: {
+        DRY_RUN: config.DRY_RUN,
+        LIVE_TRADING: config.LIVE_TRADING,
+        ENABLE_ORDER_SUBMISSION: config.ENABLE_ORDER_SUBMISSION,
+      },
       bot: botState,
       activePhase: botState.phase,
       previousPhase: botState.previousPhase || null,
@@ -60,7 +137,6 @@ async function startServer() {
       freeCollateralPct: freeCollateral,
       lastScanTime: botState.lastScanTime || null,
 
-      // Expose all potential open position fields directly to ensure robust multi-source sync
       activePositions: currentPositions,
       positions: currentPositions,
       perpPositions: currentPositions,

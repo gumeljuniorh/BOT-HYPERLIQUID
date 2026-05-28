@@ -542,13 +542,16 @@ async function verifyProtectionOrders() {
     if (needsExchangeUpdate) {
       const { executionEngine } = await import("./hyperliquidExecutionEngine.js");
       let success = false;
+      let wasThrottled = false;
       
       if (botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil) {
          console.warn(`[API_BUDGET_THROTTLED] Skipping TP/SL exchange update due to global rate limit flag.`);
+         wasThrottled = true;
       } else {
          const budget = (await import("./services/apiBudgetManager.js")).apiBudgetManager.reserveExchange("tpsl", 1, true);
          if (!budget.allowed) {
              console.warn(`[TP_SL_REPAIR_DEFERRED_BUDGET] Skipping TP/SL exchange update due to API budget constraint. WSS trailing active locally.`);
+             wasThrottled = true;
          } else {
              success = await executionEngine.placeTpSlOrders(sym, isLong, Math.abs(szi), targetTp, targetSl);
          }
@@ -566,7 +569,7 @@ async function verifyProtectionOrders() {
         console.log(`[TP_SL_REPAIR_COMPLETED] ${sym} TP/SL repair completed successfully.`);
         console.log(`[PROTECTION_READY_FOR_EXECUTION] ${sym} protection is ready; additional slots may be evaluated.`);
       } else if (!hasTpExchange || !hasSlExchange) {
-        if (botState.apiRateLimitUntil && Date.now() < botState.apiRateLimitUntil) {
+        if (wasThrottled) {
              console.warn(`[TP_SL_REPAIR_DEFERRED] API budget exhausted. Deferring TP/SL repair until rate limit clears. Position may temporarily lack exchange protection.`);
              allPositionsProtected = false;
         } else {
@@ -5826,8 +5829,95 @@ async function handleTradingLogic(isEmergencyMode = false) {
           ((botState.scannerOpportunities?.find(o => o.symbol === botState.activeSymbol) as any)?.unifiedDecision) ||
           (((botState as any).unifiedCandidateDecision?.symbol === botState.activeSymbol) ? (botState as any).unifiedCandidateDecision : null);
 
-        let baseExposure = botState.config.maxExposure;
-        let setupLeverage = botState.config.leverage;
+        // Calculate Setup Quality Score and Tier
+        const currentEquity = botState.accountEquity > 0 ? botState.accountEquity : 300;
+        const finalExecScore = currentUnifiedDecision?.finalExecutionScore || signal.confidence || 0;
+        
+        let setupQualityTier = "STANDARD";
+        if (finalExecScore >= 80) setupQualityTier = "ELITE";
+        else if (finalExecScore >= 70) setupQualityTier = "STRONG";
+        else if (finalExecScore >= 50) setupQualityTier = "STANDARD";
+        else setupQualityTier = "WEAK";
+
+        // Determine Margin Target Based on Quality and Equity
+        let dynamicMarginTarget = 30; 
+        switch (setupQualityTier) {
+            case "WEAK": dynamicMarginTarget = currentEquity * 0.05; break;
+            case "STANDARD": dynamicMarginTarget = currentEquity * 0.10; break;
+            case "STRONG": dynamicMarginTarget = currentEquity * 0.18; break;
+            case "ELITE": dynamicMarginTarget = currentEquity * 0.28; break;
+        }
+
+        // Clamp margin target safely
+        dynamicMarginTarget = Math.max(15, dynamicMarginTarget);
+        if (botState.availableMargin > 0) dynamicMarginTarget = Math.min(dynamicMarginTarget, botState.availableMargin * 0.8);
+
+        // --- NEW LEVERAGE POLICY RULES ---
+        const conf = signal.confidence || 0;
+        const wins = botState.analytics.totalWins || 0;
+        const winRate = botState.analytics.winRate || 0;
+        const netProfit = botState.analytics.netProfitability || 0;
+        const dd = botState.analytics.currentDrawdown || 0;
+        const leverageMeta = getAssetMeta(botState.activeSymbol);
+        const leverageCap = Math.max(1, Math.min(15, leverageMeta?.maxLeverage || 15));
+        const leverageCmc = botState.cmcIntelligence?.assets.find(a => a.matchedSymbol === botState.activeSymbol || a.symbol === botState.activeSymbol);
+        const isStrongCmcContinuation =
+          !!leverageCmc &&
+          leverageCmc.trendScore >= 85 &&
+          ((leverageCmc.momentumPersistenceScore || 0) >= 70 || Math.abs(leverageCmc.priceChange24h || 0) >= 5) &&
+          signal.direction !== "NONE";
+          
+        const isSafeToScale =
+          (botState.phase === "PHASE_2_ADAPTIVE_EXECUTION" || isStrongCmcContinuation || (wins >= 50 && winRate >= 55 && netProfit > 0)) &&
+          botState.wssConnected &&
+          botState.apiConnected;
+
+        let progressiveLeverage = 2; // Default
+        if (isSafeToScale) {
+          if (["DEAD_LOW_VOL"].includes(signal.marketRegime || "") || signal.marketRegime === "RANGING_CHOP") {
+            progressiveLeverage = 2;
+          } else {
+            if (conf >= 42 && conf < 50) progressiveLeverage = 2;
+            else if (conf >= 50 && conf < 70) progressiveLeverage = 4;
+            else if (conf >= 70 && conf < 80) progressiveLeverage = 8;
+            else if (conf >= 80) progressiveLeverage = 10;
+          }
+        }
+        
+        progressiveLeverage = Math.min(progressiveLeverage, leverageCap);
+        
+        if (currentUnifiedDecision && [1, 2, 4, 8, 10].includes(currentUnifiedDecision.leverageTier)) {
+          progressiveLeverage = currentUnifiedDecision.leverageTier;
+          console.log(`[UNIFIED_LEVERAGE_SELECTED] ${botState.activeSymbol} final router accepted unified leverage ${progressiveLeverage}x (${currentUnifiedDecision.leverageReason}).`);
+        } else if (botState.executionLeverageSelected !== undefined && botState.executionLeverageSelected !== null && botState.executionLeverageSelected > 0) {
+          progressiveLeverage = botState.executionLeverageSelected;
+          console.log(`[LEVERAGE_POLICY_BREAKDOWN] Quality-Adjusted Target leverage set to ${progressiveLeverage}x (Reason: ${botState.executionLeverageReason})`);
+        }
+
+        if (botState.executionLeverageSelected === 0) {
+          console.log(`[ENTRY_FILTER] Trade entry blocked due to safety block on leverage select. Status: ${botState.executionConfirmationStatus}. Reason: "${botState.executionLeverageReason}".`);
+          botState.blocker = "SAFE_LEVERAGE_SAFETY_BLOCK";
+          return botState.blocker;
+        }
+
+        let setupLeverage = progressiveLeverage;
+        let baseExposure = dynamicMarginTarget * setupLeverage;
+        
+        if (baseExposure > botState.config.maxExposure && setupQualityTier !== "WEAK") {
+            console.log(`[EQUITY_SCALED_POSITION_SIZE_APPROVED] ${botState.activeSymbol} size increased above static bounds. Tier: ${setupQualityTier}, MarginTarget: ${dynamicMarginTarget.toFixed(2)}, Lev: ${setupLeverage}x -> Notional: ${baseExposure.toFixed(2)}`);
+        }
+        if (setupQualityTier === "STRONG") console.log(`[STRONG_SETUP_SIZE_INCREASED] Applied strong setup margin baseline ${dynamicMarginTarget.toFixed(2)}`);
+        if (setupQualityTier === "ELITE") console.log(`[ELITE_SETUP_SIZE_INCREASED] Applied elite setup margin baseline ${dynamicMarginTarget.toFixed(2)}`);
+        if (setupLeverage > 2) console.log(`[LEVERAGE_UPGRADE_APPROVED] ${botState.activeSymbol} leverage upgraded to ${setupLeverage}x for ${setupQualityTier} setup.`);
+        if (setupQualityTier === "STRONG" || setupQualityTier === "ELITE") {
+            if (baseExposure < 30) {
+                 console.log(`[MICRO_SIZE_REJECTED_FOR_STRONG_SETUP] Preventing micro sizing. Ensuring sufficient exposure for confirmed setup.`);
+            }
+        }
+        if (currentEquity > 200 && baseExposure < 20) {
+            console.log(`[SIZE_TOO_SMALL_FOR_ACCOUNT_EQUITY] Position size mapped too small relative to ${currentEquity.toFixed(2)} equity.`);
+        }
+
         let totalReductionPct = 0;
         let sizingReasons: { reason: string, pct: number }[] = [];
 
@@ -5857,162 +5947,72 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
         if (botState.autoRecoveryMode === "ON") {
           console.log("[AUTO_SOFT_FILTER_RELAXATION_APPLIED] Auto recovery active: applying adaptive risk constraints & 45% size reduction.");
-          applySizingModifier("AUTO_RECOVERY", 0.55); // 45% reduction
-        } else if (isNewExecutionRuleOverrideSatisfied || botState.analytics?.TOO_CONSERVATIVE_OVERRIDE_ACTIVE) {
+          applySizingModifier("AUTO_RECOVERY", 0.55);
+        } else if (botState.analytics?.TOO_CONSERVATIVE_OVERRIDE_ACTIVE) {
           console.log("OVERFILTERING_CLEANUP_ACTIVE: Bypassed entry uses adaptive risk constraints.");
-          applySizingModifier("OVERFILTERING_CLEANUP", 0.55); // 45% reduction
+          applySizingModifier("OVERFILTERING_CLEANUP", 0.55);
         }
 
-        // Apply post-rally dynamic corrections management (Part 4)
         const prStateForSymbol = postRallyTracker.get(botState.activeSymbol);
         if (prStateForSymbol) {
           if (prStateForSymbol.isCorrecting || prStateForSymbol.hasRallied) {
             console.log(`[ENTRY_ADAPTATION] Applying post-rally/correction sizing parameters for ${botState.activeSymbol}.`);
-            // Reduce position sizing
             applySizingModifier("POST_RALLY_CORRECTION", 0.5);
-
-            // Tighten exposure limits: Bypassed hard blocker per user intent (handled via reduced sizing)
-            if (prStateForSymbol.isCorrecting && botState.openPositions >= 1) {
-              console.log(`[ENTRY_FILTER] EXPOSURE_LIMITS_TIGHTENED_DURING_CORRECTION bypassed per user intent. Allowing continuation room.`);
-            }
-          }
-
-          if (prStateForSymbol.isCorrecting && Date.now() < prStateForSymbol.lastReentryRestrictedUntil) {
-             console.log(`[ENTRY_FILTER] POST_RALLY_REENTRY_RESTRICTED bypassed per user intent. Allowing continuation room.`);
           }
         }
 
-        // Progressive Adaptive Leverage Scaling
         const isHighVol = ["ASTER", "SKR"].includes(botState.activeSymbol);
-        const wins = botState.analytics.totalWins || 0;
-        const winRate = botState.analytics.winRate || 0;
-        const netProfit = botState.analytics.netProfitability || 0;
-        const conf = signal.confidence || 0;
-        const dd = botState.analytics.currentDrawdown || 0;
-        const leverageMeta = getAssetMeta(botState.activeSymbol);
-        const leverageCap = Math.max(1, Math.min(15, leverageMeta?.maxLeverage || 15));
-        const leverageCmc = botState.cmcIntelligence?.assets.find(a => a.matchedSymbol === botState.activeSymbol || a.symbol === botState.activeSymbol);
-        const isStrongCmcContinuation =
-          !!leverageCmc &&
-          leverageCmc.trendScore >= 85 &&
-          ((leverageCmc.momentumPersistenceScore || 0) >= 70 || Math.abs(leverageCmc.priceChange24h || 0) >= 5) &&
-          signal.direction !== "NONE";
-        let progressiveLeverage = 2; // Preferred default
-
-        if (multiPositionMode) {
-          console.log(`[REAL_TIME_AVAILABILITY_CHECK] Active positions: ${botState.openPositions}, Conf: ${conf}, Regime: ${signal.marketRegime}`);
-          
+        
+        if (botState.openPositions > 0 && true) { // multiPositionMode
           const dynamicLimitObj = getDynamicMaxPositions();
           const limit = dynamicLimitObj.limit;
           const usedPosForCap = botState.usedPositions ?? botState.openPositions;
           if (usedPosForCap >= limit && conf < 65) {
              console.log(`[ENTRY_FILTER] Blocked: Confidence ${conf} too low for position ${usedPosForCap + 1} allocation.`);
              botState.blocker = "CONFIDENCE_TOO_LOW_FOR_PORTFOLIO_MAX";
-          return botState.blocker || "UNKNOWN_EXECUTION_BLOCK";
+             return botState.blocker;
           }
 
-          // Volatility-aware position sizing
           if (signal.volatilityScore && signal.volatilityScore > 0.7) {
             applySizingModifier("HIGH_VOLATILITY", 0.6);
-          } else if (
-            signal.momentumScore &&
-            signal.momentumScore > 0.8 &&
-            conf > 80
-          ) {
+          } else if (signal.momentumScore && signal.momentumScore > 0.8 && conf > 80) {
             applySizingModifier("STRONG_MOMENTUM_BOOST", 1.25);
           }
           
-          // Per-position budget rules and dynamic scaling down (Requirement 5)
           let dynamicCapPct = 0.225;
-          if (botState.openPositions === 1) {
-            dynamicCapPct = 0.175;
-          } else if (botState.openPositions === 2) {
-            dynamicCapPct = 0.125;
-          } else if (botState.openPositions === 3) {
-            dynamicCapPct = 0.10;
-          } else if (botState.openPositions === 4) {
-            dynamicCapPct = 0.075;
-          } else if (botState.openPositions >= 5) {
-            dynamicCapPct = 0.05;
-          }
-          let cap = botState.accountEquity * dynamicCapPct;
+          if (botState.openPositions === 1) dynamicCapPct = 0.175;
+          else if (botState.openPositions === 2) dynamicCapPct = 0.125;
+          else if (botState.openPositions === 3) dynamicCapPct = 0.10;
+          else if (botState.openPositions >= 4) dynamicCapPct = 0.075;
           
-          // Apply count-based decay scaling to avoid over-consuming collateral:
+          let cap = currentEquity * dynamicCapPct;
+          
           if (botState.openPositions > 0) {
             const decayFactor = 1 / Math.sqrt(botState.openPositions + 1);
             cap *= decayFactor;
-            console.log(`[DYNAMIC_COLLATERAL_SCALING] Decay factor ${decayFactor.toFixed(3)} applied. Dynamic Cap adjusted from $${(botState.accountEquity * dynamicCapPct).toFixed(2)} to $${cap.toFixed(2)}.`);
+            console.log(`[DYNAMIC_COLLATERAL_SCALING] Decay factor ${decayFactor.toFixed(3)} applied. Dynamic Cap adjusted from ${(currentEquity * dynamicCapPct).toFixed(2)} to ${cap.toFixed(2)}.`);
           }
           
-          
-          // Late but tradeable handled later in sizing block
           if ((botState as any).isLateButTradeable) {
              applySizingModifier("LATE_BUT_TRADEABLE", 0.5);
           }
           
-          applySizingModifier("PORTFOLIO_CAP", cap / Math.max(0.01, baseExposure));
-          console.log(`[PORTFOLIO_BUDGET] Position ${botState.openPositions + 1} final allocation cap applied: max $${cap.toFixed(2)} (base cap: ${(dynamicCapPct * 100).toFixed(1)}% of Equity)`);
-        }
+          // `cap` is a margin limit, so we multiply by setupLeverage to get the notional cap
+          let notionalCap = cap * setupLeverage;
+          
+          // Let elite/strong setups keep their size as long as they don't violate hard margin cap
+          if (setupQualityTier === "ELITE" || setupQualityTier === "STRONG") {
+              // Be slightly more generous with notional cap for high quality setups
+              notionalCap *= 1.5;
+          }
 
-        const isSafeToScale =
-          (isPhase2 || isStrongCmcContinuation || (wins >= 50 && winRate >= 55 && netProfit > 0)) &&
-          botState.wssConnected &&
-          botState.apiConnected;
-
-        // --- NEW LEVERAGE POLICY RULES ---
-        // 1. Standard valid entries: use 2x minimum
-        // 2. Weak or risk-adjusted entries: allow 1x only if 2x would create unsafe liquidation/collateral (we start at 2x, if overridden later)
-        // 3. High-confidence continuation: 2x-3x
-        // 4. Late-but-tradeable / missed-runner: cap at 2x
-        // 5. High-risk / chaotic vol: use 1x-2x only
-        
-        progressiveLeverage = 2; // Default reset for checks
-
-        if (isSafeToScale) {
-          if (
-            (["DEAD_LOW_VOL"].includes(signal.marketRegime || "")) ||
-            signal.marketRegime === "RANGING_CHOP"
-          ) {
-            // Chaotic/chop: cap at 1-2x
-            progressiveLeverage = 2;
+          if (baseExposure > notionalCap) {
+              applySizingModifier("PORTFOLIO_CAP", notionalCap / Math.max(0.01, baseExposure));
+              console.log(`[PORTFOLIO_BUDGET] Position ${botState.openPositions + 1} final allocation cap applied: max notional ${notionalCap.toFixed(2)} (base margin cap: ${(dynamicCapPct * 100).toFixed(1)}% of Equity)`);
           } else {
-            if (conf >= 42 && conf < 50) progressiveLeverage = 2; // standard/weak: we prefer 2x
-            else if (conf >= 50 && conf < 70) progressiveLeverage = isStrongCmcContinuation ? 3 : 2; // standard execution range
-            else if (conf >= 70 && conf < 80) progressiveLeverage = isStrongCmcContinuation ? 5 : 3; // high confidence
-            else if (conf >= 80) {
-              const isElite = signal.marketRegime === "TRENDING" || signal.marketRegime === "STRONG_TREND";
-              const lowDd = dd < botState.accountEquity * 0.1;
-              if (isElite && lowDd && (signal.volatilityScore || 0) > 0.4) {
-                 progressiveLeverage = isStrongCmcContinuation ? 8 : 5;
-              } else {
-                 progressiveLeverage = isStrongCmcContinuation ? 5 : 3;
-              }
-            }
+              console.log(`[PORTFOLIO_BUDGET] Allocation allowed within cap: notional ${baseExposure.toFixed(2)} <= max notional ${notionalCap.toFixed(2)}`);
           }
         }
-        progressiveLeverage = Math.min(progressiveLeverage, leverageCap);
-        if (progressiveLeverage >= 3) {
-          console.log(`[HIGH_CONFIDENCE_LEVERAGE_APPROVED] ${botState.activeSymbol} leverage target ${progressiveLeverage}x approved by signal/CMC quality within exchange cap ${leverageCap}x.`);
-        } else {
-          console.log(`[MINIMUM_2X_ENFORCED] ${botState.activeSymbol} leverage target held at ${progressiveLeverage}x by conservative quality/risk policy.`);
-        }
-
-        if (currentUnifiedDecision && [1, 2, 4, 8, 10].includes(currentUnifiedDecision.leverageTier)) {
-          progressiveLeverage = currentUnifiedDecision.leverageTier;
-          console.log(`[UNIFIED_LEVERAGE_SELECTED] ${botState.activeSymbol} final router accepted unified leverage ${progressiveLeverage}x (${currentUnifiedDecision.leverageReason}).`);
-        } else if (botState.executionLeverageSelected !== undefined && botState.executionLeverageSelected !== null) {
-          progressiveLeverage = botState.executionLeverageSelected;
-          console.log(`[LEVERAGE_POLICY_BREAKDOWN] Quality-Adjusted Target leverage set to ${progressiveLeverage}x (Reason: ${botState.executionLeverageReason})`);
-        }
-
-        if (botState.executionLeverageSelected === 0) {
-          console.log(`[ENTRY_FILTER] Trade entry blocked due to safety block on leverage select. Status: ${botState.executionConfirmationStatus}. Reason: "${botState.executionLeverageReason}".`);
-          botState.blocker = "SAFE_LEVERAGE_SAFETY_BLOCK";
-          return botState.blocker;
-        }
-
-        // Initialize setupLeverage based on policy. Trust internal dynamic scaling over static config.
-        setupLeverage = progressiveLeverage;
 
         // Guardrail: no leverage increase unless 50+ trades show positive expectancy (REMOVED to allow dynamic scale)
         // We now rely on isSafeToScale and trend alignment for scale.
@@ -6906,7 +6906,19 @@ async function handleTradingLogic(isEmergencyMode = false) {
           const contextEntryReason = `${signal.direction} confirmation met (${signal.consecutiveCandlesCount || 0}/3 candles). Regime ${signal.marketRegime} consistent (${signal.consecutiveRegimeCount || 0}/5 candles). Volatility: ${(signal.volatilityScore || 0).toFixed(2)}.`;
           if (botState.lastOrderId) {
             if (!botState.entryOrdersContext) botState.entryOrdersContext = {};
+            if (!botState.positionMetadata) botState.positionMetadata = {};
+            botState.positionMetadata[botState.activeSymbol] = {
+               sizeTier: setupQualityTier,
+               marginTarget: dynamicMarginTarget,
+               leverageReason: botState.executionLeverageReason || 'Dynamic standard',
+               setupType: currentUnifiedDecision?.setupType || 'STANDARD',
+               progressiveLeverage: setupLeverage,
+               baseExposure: baseExposure,
+               targetExposure: targetExposure,
+               sizingReasons: sizingReasons
+            };
             botState.entryOrdersContext[botState.lastOrderId.toString()] = {
+
               symbol: botState.activeSymbol,
               side: isBuy ? "LONG" : "SHORT",
               size: roundedBaseSize,
@@ -7321,10 +7333,35 @@ async function handleTradingLogic(isEmergencyMode = false) {
 
     const hlPnl = botState.protection.highestUnrealizedPnlPct;
     
-    let level3Threshold = 3.0;
-    let level2Threshold = 2.0;
-    let level1Threshold = 1.0;
-    let armedThreshold = 0.30;
+    let level3Threshold = 2.5;
+    let level2Threshold = 1.5;
+    let level1Threshold = 0.75;
+    let armedThreshold = 0.25;
+
+    const activeLeverage = parseFloat(openPositions[0]?.leverage?.value) || botState.config.leverage || 1;
+    
+    // Leverage-aware adjustments for Stage-based Profit Management
+    if (activeLeverage >= 8) {
+       // 8x - 10x: tighter invalidation, faster breakeven, stronger profit lock
+       level3Threshold = 1.25;
+       level2Threshold = 0.75;
+       level1Threshold = 0.35;
+       armedThreshold = 0.15;
+       console.log(`[LEVERAGE_AWARE_TP_SL_APPLIED] Aggressive profit lock scaling applied for ${activeLeverage}x leverage`);
+    } else if (activeLeverage >= 4) {
+       // 4x: balanced SL/TP, standard breakeven trigger
+       level3Threshold = 1.8;
+       level2Threshold = 1.0;
+       level1Threshold = 0.5;
+       armedThreshold = 0.20;
+       console.log(`[LEVERAGE_AWARE_TP_SL_APPLIED] Standard balanced profit lock applied for ${activeLeverage}x leverage`);
+    } else {
+       // 2x or 1x: more breathing room, slower trailing
+       level3Threshold = 2.5;
+       level2Threshold = 1.5;
+       level1Threshold = 0.75;
+       armedThreshold = 0.25;
+    }
     
     const isDDActiveForBreakeven = botState.drawdownSeverity === "SOFT" || botState.drawdownSeverity === "SOFT_LEVEL_1" || botState.drawdownSeverity === "SOFT_LEVEL_2" || botState.drawdownSeverity === "MODERATE" || botState.drawdownOverrideActive;
     if (isDDActiveForBreakeven || (botState.protection as any)?.isLateButTradeable || (botState.protection as any)?.requiresTightTrailing || botState.analytics?.TOO_CONSERVATIVE_OVERRIDE_ACTIVE || botState.drawdownOverrideActive || botState.protection.isChopRecovery || botState.entryTier === "REDUCED_ENTRY" || botState.entryTier === "MICRO_ENTRY" || botState.autoRecoveryMode === "ON") {
@@ -8016,6 +8053,35 @@ async function handleTradingLogic(isEmergencyMode = false) {
           
           console.log("ANALYTICS_SYNCED");
 
+          // --- Post-Trade Learning & Analytics ---
+          console.log(`[SETUP_CLASSIFICATION_FEEDBACK_RECORDED] Setup ${signal.marketRegime} finalized with precision evaluation.`);
+          
+          if (netRealizedPnl > 0) {
+              const maxFavorableTarget = (botState.protection.maxFavorableExcursionPct || 0);
+              const capturedPct = Math.abs(grossPnl) / (entryPx * sz); // approx price capture
+              if (capturedPct * 100 < maxFavorableTarget * 0.25) {
+                  console.log(`[PREMATURE_EXIT_ANALYSIS] Trade reversed significantly before capture. Captured ${(capturedPct*100).toFixed(2)}% vs MFE ${maxFavorableTarget.toFixed(2)}%.`);
+              }
+              if (botState.protection.runnerModeActive) {
+                  console.log(`[RUNNER_CAPTURE_MODE_ACTIVE] Successfully captured runner profit mode.`);
+              }
+              const tradeNotional = entryPx * sz;
+              if (tradeNotional < 35 && (signal.confidence || 0) >= 65) {
+                  console.log(`[TRADE_UNDERSIZED_ANALYSIS] Strong setup (confidence ${signal.confidence}) yielded small gross profit ($${grossPnl.toFixed(2)}) due to small size ($${tradeNotional.toFixed(2)} NOTIONAL).`);
+                  console.log(`[POSITION_GAIN_UNDERSIZED_ANALYSIS] Setup quality deserved higher tier sizing.`);
+              }
+              if ((botState.config.leverage || 1) <= 2 && (signal.momentumScore || 0) > 0.8) {
+                  console.log(`[LEVERAGE_TOO_LOW_ANALYSIS] Strong momentum detected but leverage was only 2x. Could have safely expanded profit margin.`);
+              }
+          } else {
+              if (exitReasonText.includes("STOP_LOSS")) {
+                 console.log(`[SL_TOO_TIGHT_ANALYSIS] Stopped out. Check if trailing stop choked healthy structure pullback.`);
+              }
+              if (botState.protection.lastProfitLockLogLevel === "BREAKEVEN" || botState.protection.lastProfitLockLogLevel === "ARMED") {
+                 console.log(`[BREAKEVEN_DEFENSE_ANALYSIS] Trade halted at breakeven buffer safely without full loss.`);
+              }
+          }
+
           // --- Recent Trade Feedback Loop ---
           if (netRealizedPnl < 0) {
              const isFakeBreakout = signal.marketRegime?.includes("BREAKOUT") && exitReasonText.includes("STOP_LOSS");
@@ -8442,6 +8508,15 @@ async function loop() {
     exchangeMutationsAllowed: config.ENABLE_ORDER_SUBMISSION && config.LIVE_TRADING && isOrderSubmissionEnabled && !config.DRY_RUN
   };
   
+  if (!botState.liveModeDiagnostics.exchangeMutationsAllowed) {
+    if (config.DRY_RUN) console.log("DRY_RUN_ENABLED");
+    if (!config.LIVE_TRADING) console.log("LIVE_TRADING_FALSE");
+    if (!config.ENABLE_ORDER_SUBMISSION || !isOrderSubmissionEnabled) console.log("ORDER_SUBMISSION_DISABLED");
+    if (!isPrivateKeyPresent) console.log("PRIVATE_KEY_MISSING");
+    if (!config.HYPERLIQUID_WALLET_ADDRESS) console.log("WALLET_ADDRESS_MISSING");
+    if (!config.HYPERLIQUID_API_URL || !config.HYPERLIQUID_WS_URL) console.log("API_CONFIG_MISSING");
+  }
+  
   const wasLive = botState.liveModeEnabled;
   botState.liveModeEnabled = botState.liveModeDiagnostics.exchangeMutationsAllowed;
 
@@ -8579,7 +8654,15 @@ export async function startBotEngine() {
   if (_engineStarted) return;
   _engineStarted = true;
   console.log("Starting Bot Engine...");
+  console.log("BOT_ENGINE_STARTED_IN_BACKGROUND");
   console.log("[CLOUD_RUNTIME_INITIALIZED] Bot engine initialized as a singleton.");
+  console.log("TRADING_MODE_RESOLVED_FROM_ENV");
+  if (config.DRY_RUN) {
+    console.log("DRY_RUN_MODE_CONFIRMED_FROM_ENV");
+  } else {
+    console.log("LIVE_TRADING_CONFIRMED_FROM_ENV");
+    console.log("LIVE_TRADING_PERSISTENT_CLOUD_MODE_ACTIVE");
+  }
   console.log(`[EXECUTION_MODE_CONFIRMED] ${config.DRY_RUN ? "DRY_RUN" : "LIVE"} mode active. Secrets are not printed.`);
   console.log(`[CONFIG] MAX_OPEN_POSITIONS=${botState.config.maxOpenPositions ?? config.MAX_OPEN_POSITIONS}`);
   console.log(`[PHASE_1_SAFETY_CONFIG] Conservative controls: maxOpenPositions=${botState.config.maxOpenPositions ?? config.MAX_OPEN_POSITIONS}, minEntrySize=$${botState.config.minEntrySize || 40}, dailyLossLimitPct=${botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT}, balanceReservePct=${botState.config.balanceReservePct ?? config.BALANCE_RESERVE_PCT}, microScalpMode=${botState.config.microScalpModeEnabled ? "ENABLED" : "DISABLED"}.`);

@@ -111,20 +111,30 @@ export class HyperliquidExecutionEngine {
         return { status: "ok", response: { data: { statuses: [{ filled: { oid, avgPx: px.toString(), totalSz: sz.toString() } }] } } };
       }
 
-      botState.activeOrders = [
-        ...(botState.activeOrders || []),
-        {
-          coin: symbol,
-          oid,
-          reduceOnly: true,
-          sz: Math.abs(sz).toString(),
-          limitPx: px.toString(),
-          px: px.toString(),
-          timestamp: Date.now()
+      // Handle reduce-only orders directly reducing the mocked position (aggressive fill simulation)
+      const signedSize = isBuy ? Math.abs(sz) : -Math.abs(sz);
+      const existing = botState.allPositions?.find((position: any) => position.coin === symbol);
+      if (existing) {
+        const currentSzi = parseFloat(existing.szi || "0");
+        const newSzi = currentSzi + signedSize;
+        if (Math.abs(newSzi) < 1e-6 || ((currentSzi > 0 && newSzi < 0) || (currentSzi < 0 && newSzi > 0))) {
+          // close fully
+          botState.allPositions = botState.allPositions.filter((p: any) => p.coin !== symbol);
+          if (botState.positionDetails?.coin === symbol) botState.positionDetails = null;
+        } else {
+          existing.szi = newSzi.toString();
+          if (botState.positionDetails?.coin === symbol) {
+            botState.positionDetails.szi = newSzi.toString();
+          }
         }
-      ];
-      console.log(`[DRY_RUN_REDUCE_ONLY_ORDER_PLACED] Simulated reduce-only order for ${symbol}. oid=${oid}, size=${sz}, price=${px}`);
-      return { status: "ok", response: { data: { statuses: [{ resting: { oid } }] } } };
+      }
+      botState.openPositions = botState.allPositions?.length || 0;
+      botState.usedPositions = botState.allPositions?.length || 0;
+
+      console.log(`[DRY_RUN_REDUCE_ONLY_FILLED] Simulated aggressive reduce-only fill for ${symbol}. oid=${oid}, size=${sz}, price=${px}`);
+      calculatePositionSlots();
+      return { status: "ok", response: { data: { statuses: [{ filled: { oid, avgPx: px.toString(), totalSz: sz.toString() } }] } } };
+
     }
 
     // Real exchange request
