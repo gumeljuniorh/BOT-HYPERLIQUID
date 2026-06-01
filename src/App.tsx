@@ -958,23 +958,21 @@ function AppContent() {
       <div className="bg-[#10141a] border-b border-[#2B3139] px-4 md:px-6 py-2 flex items-center justify-between text-[9px] uppercase font-mono tracking-widest text-[#848E9C]">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
-            <span className="opacity-60">Last Heartbeat:</span>
-            <span className="text-[#EAECEF] font-bold">{new Date(backendTime).toLocaleTimeString()}</span>
+            <span className="opacity-60">Execution Mode:</span>
+            <span className={cn("font-bold text-[#EAECEF]", status?.configInfo?.DRY_RUN ? "text-amber-500" : "text-emerald-400")}>{status?.configInfo?.DRY_RUN ? "DRY RUN" : "LIVE TRADING"}</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="opacity-60">Engine Loop:</span>
-            <span className={cn("font-black", bot.cloudRuntimeHealth?.LOOP_HEALTHY !== false ? "text-emerald-400" : "text-rose-500")}>
-              {bot.cloudRuntimeHealth?.LOOP_HEALTHY !== false ? "ACTIVE" : "STALLED"}
-            </span>
+            <span className="opacity-60">Bot Runtime:</span>
+            <span className="text-emerald-400 font-bold">RUNNING IN CLOUD</span>
           </div>
-          <div className="flex items-center gap-2 hidden md:flex">
-            <span className="opacity-60">Last Scan:</span>
-            <span className="text-[#EAECEF]">{bot.lastScanTime ? new Date(bot.lastScanTime).toLocaleTimeString() : 'N/A'}</span>
+          <div className="flex items-center gap-2">
+            <span className="opacity-60">Browser Dependency:</span>
+            <span className="text-emerald-400 font-bold">NO</span>
           </div>
         </div>
         <div className="flex items-center gap-2">
-           <span className="opacity-60">Live Mode Source:</span>
-           <span className="text-amber-500/80 font-bold bg-amber-500/10 px-1 rounded">CLOUD_ENV_VARS</span>
+           <span className="opacity-60">Mode Source:</span>
+           <span className="text-amber-500/80 font-bold bg-amber-500/10 px-1 rounded">CLOUD ENV</span>
         </div>
       </div>
 

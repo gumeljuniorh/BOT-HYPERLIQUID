@@ -30,6 +30,9 @@ export interface BotConfig {
   leverage: number;
   stopLossPct: number;
   takeProfitPct: number;
+  trailingStopLossEnabled?: boolean;
+  trailingStopLossActivationPct?: number;
+  trailingStopLossTrailPct?: number;
   minEntrySize?: number;
   maxOpenPositions?: number;
   dailyLossLimitPct?: number;
@@ -96,7 +99,12 @@ export interface ScannerOpportunity {
 
 export interface BotState {
   dryRun: boolean;
+  explicitUserDryRunToggle?: boolean;
+  dailyLossBypassDate?: string;
   phase: BotPhase;
+  isSmallAccountMode?: boolean;
+  smallAccountLeverageCap?: number;
+  smallAccountMaxMargin?: number;
   isProgrammaticClosing?: boolean;
   maxAllowedPositions?: number;
   dynamicPositionLimitReason?: string;
@@ -122,6 +130,7 @@ export interface BotState {
     privateKeyPresent: boolean;
     orderSubmissionEnabled: boolean;
     exchangeMutationsAllowed: boolean;
+    dryRunReason?: string | null;
   };
   apiConnected: boolean;
   wssConnected: boolean;
@@ -148,6 +157,9 @@ export interface BotState {
   wssReconnectAttempts?: number;
   lastWssTime?: number;
   accountEquity: number;
+  startOfDayEquity?: number;
+  dailyPnlDate?: string;
+  dailyNetEquityChange?: number;
   availableMargin: number;
   reservedPositionMargin?: number;
   reservedOrderMargin?: number;
@@ -160,6 +172,12 @@ export interface BotState {
   liquidationPrice: number | null;
   unrealizedPnl: number;
   realizedPnl: number;
+  realizedLivePnl?: number;
+  unrealizedLivePnl?: number;
+  dailyLivePnl?: number;
+  mockRealizedPnl?: number;
+  mockUnrealizedPnl?: number;
+  mockDailyPnl?: number;
   action?: string;
   activeSymbol: string;
   markPrice: number;
@@ -492,6 +510,7 @@ export interface TradeLog {
   fillPrice?: number;
   orderId: string;
   closeOrderId?: string;
+  isMock?: boolean;
   leverage?: number;
   size?: number;
   notional?: number;

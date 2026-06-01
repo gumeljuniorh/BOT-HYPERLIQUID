@@ -62,6 +62,15 @@ export class TradeLogger {
   }
 
   async logTrade(trade: TradeLog) {
+    if (trade.isMock === undefined) {
+      if (typeof window === 'undefined') {
+        const { config } = await import("./config.js");
+        trade.isMock = config.DRY_RUN;
+      } else {
+        trade.isMock = botState.dryRun;
+      }
+    }
+    
     if (trade.type === "EXIT") {
       // 1. Rebuild trade lifecycle matching & deduplication
       const sortedTrades = [...botState.trades].sort((a, b) => a.timestamp - b.timestamp);

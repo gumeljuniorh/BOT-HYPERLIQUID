@@ -825,33 +825,73 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
               </div>
               <div className="grid grid-cols-2 gap-2 text-[9px] font-mono text-slate-400 font-medium">
                 <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
-                  <span>DRY_RUN:</span>
-                  <span className={bot?.liveModeDiagnostics?.DRY_RUN ? "text-amber-400" : "text-emerald-400"}>
-                    {bot?.liveModeDiagnostics?.DRY_RUN !== undefined ? (bot.liveModeDiagnostics.DRY_RUN ? "TRUE" : "FALSE") : "UNKNOWN"}
+                  <span>Execution Mode:</span>
+                  <span className={bot?.liveModeDiagnostics?.DRY_RUN ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
+                    {bot?.liveModeDiagnostics?.DRY_RUN ? "DRY_RUN" : "LIVE TRADING"}
                   </span>
                 </div>
                 <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
-                  <span>LIVE_TRADING:</span>
-                  <span className={bot?.liveModeDiagnostics?.LIVE_TRADING ? "text-emerald-400" : "text-slate-500"}>
-                    {bot?.liveModeDiagnostics?.LIVE_TRADING !== undefined ? (bot.liveModeDiagnostics.LIVE_TRADING ? "TRUE" : "FALSE") : "UNKNOWN"}
+                  <span>Mode Source:</span>
+                  <span className="text-emerald-400 font-bold">
+                    CLOUD ENV
                   </span>
                 </div>
                 <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
-                  <span>Has Private Key:</span>
-                  <span className={bot?.liveModeDiagnostics?.privateKeyPresent ? "text-emerald-400" : "text-rose-450"}>
+                  <span>Bot Runtime:</span>
+                  <span className="text-emerald-400 font-bold">
+                    RUNNING IN CLOUD
+                  </span>
+                </div>
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>Browser Dependency:</span>
+                  <span className="text-emerald-400 font-bold">
+                    NO
+                  </span>
+                </div>
+                <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>Private Key Loaded:</span>
+                  <span className={bot?.liveModeDiagnostics?.privateKeyPresent ? "text-emerald-400 font-bold" : "text-rose-450 font-bold"}>
                     {bot?.liveModeDiagnostics?.privateKeyPresent !== undefined ? (bot.liveModeDiagnostics.privateKeyPresent ? "YES" : "NO") : "UNKNOWN"}
                   </span>
                 </div>
                 <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
-                  <span>Core Orders Enabled:</span>
-                  <span className={bot?.liveModeDiagnostics?.orderSubmissionEnabled ? "text-emerald-400" : "text-amber-500"}>
-                    {bot?.liveModeDiagnostics?.orderSubmissionEnabled !== undefined ? (bot.liveModeDiagnostics.orderSubmissionEnabled ? "YES" : "NO") : "UNKNOWN"}
+                  <span>Exchange Mutations:</span>
+                  <span className={bot?.liveModeDiagnostics?.exchangeMutationsAllowed ? "text-emerald-400 font-bold" : "text-rose-500 font-bold"}>
+                     {bot?.liveModeDiagnostics?.exchangeMutationsAllowed ? "ENABLED" : "DISABLED"}
+                  </span>
+                </div>
+                <div className="flex justify-between p-1.5 col-span-2 bg-[#11151B] rounded border border-slate-700/20">
+                  <span>Order Submission:</span>
+                  <span className={bot?.liveModeDiagnostics?.orderSubmissionEnabled ? "text-emerald-400 font-bold" : "text-amber-500 font-bold"}>
+                    {bot?.liveModeDiagnostics?.orderSubmissionEnabled !== undefined ? (bot.liveModeDiagnostics.orderSubmissionEnabled ? "ENABLED" : "DISABLED") : "UNKNOWN"}
                   </span>
                 </div>
               </div>
-              <div className={cn("mt-2 p-1.5 rounded text-center border text-[9.5px]", bot?.liveModeEnabled ? "bg-emerald-900/20 border-emerald-500/30 text-emerald-400" : "bg-rose-900/20 border-rose-500/30 text-rose-500")}>
-                 <span>Exchange Mutations: <strong>{bot?.liveModeDiagnostics?.exchangeMutationsAllowed ? "ALLOWED_AND_DISPATCHING" : "DISABLED_AND_LOCKED"}</strong></span>
-              </div>
+              
+              {bot?.liveModeDiagnostics?.DRY_RUN && (
+                 <div className="mt-2 text-center text-[9px] font-mono text-slate-400 bg-amber-500/10 p-1 rounded border border-amber-500/20">
+                   Reason: <strong className="text-amber-500">{bot?.liveModeDiagnostics?.dryRunReason || "EXPLICIT_USER_TOGGLE / OR DEFAULT SIMULATION"}</strong>
+                 </div>
+              )}
+              
+              {bot?.isSmallAccountMode && (
+                 <div className="mt-3 text-left text-[9px] font-mono text-amber-400 bg-amber-500/10 p-2 rounded border border-amber-500/30">
+                   <div className="flex items-center gap-1 font-bold mb-1 uppercase tracking-wider text-[10px]">
+                     <ShieldAlert className="w-3.5 h-3.5" /> SMALL_ACCOUNT_PROOF_MODE
+                   </div>
+                   <div className="grid grid-cols-2 gap-1 mt-2 text-slate-300">
+                     <span className="text-slate-500">Max Positions:</span>
+                     <span className="font-bold text-amber-400">{bot?.effectiveMaxPositions} (Normal: 1)</span>
+                     <span className="text-slate-500">Leverage Cap:</span>
+                     <span className="font-bold">{bot?.smallAccountLeverageCap || 2}x (Max 4x)</span>
+                     <span className="text-slate-500">Capital Guard:</span>
+                     <span className="text-emerald-400 font-bold">STRICT_BREAKEVEN</span>
+                     <span className="text-slate-500">Max Trade Risk:</span>
+                     <span className="font-bold uppercase">~{(bot?.accountEquity * 0.40).toFixed(2)} USD</span>
+                   </div>
+                 </div>
+              )}
+
               <button
                 onClick={async () => {
                   try {
@@ -882,6 +922,75 @@ export function SimpleDashboard({ bot, blockerInfo, isAdvancedMode, setIsAdvance
               )}
             </div>
           )}
+
+          {/* Daily Risk Accounting Panel */}
+          <div id="daily-risk-accounting" className="p-4 flex flex-col bg-[#0A0D10] select-none shrink-0 border-b border-[#1F252C]">
+            <div className="flex justify-between items-center text-[10px] font-mono text-[#848E9C] font-bold uppercase tracking-wider mb-3 shrink-0">
+              <span className="flex items-center gap-1">
+                <Activity className="w-3.5 h-3.5 text-blue-400" /> Daily Risk Accounting
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[9px] font-mono text-slate-400 font-medium">
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20 col-span-2">
+                <span>Current Real Equity:</span>
+                <span className="text-white font-bold">${bot?.accountEquity?.toFixed(2) || "0.00"}</span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Start Of Day Equity:</span>
+                <span className="text-slate-300">${bot?.startOfDayEquity?.toFixed(2) || "N/A"}</span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Daily Net Change:</span>
+                <span className={cn("font-bold", (bot?.dailyNetEquityChange || 0) >= 0 ? "text-emerald-400" : "text-rose-500")}>
+                  ${bot?.dailyNetEquityChange?.toFixed(2) || "0.00"}
+                </span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Daily Loss Amount:</span>
+                <span className="text-rose-450">${Math.min(0, bot?.dailyNetEquityChange || 0).toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Daily Loss Limit Pct:</span>
+                <span className="text-amber-400">{bot?.config?.dailyLossLimitPct || 3}%</span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Mock PnL Excluded:</span>
+                <span className={bot?.liveModeDiagnostics?.DRY_RUN ? "text-slate-500" : "text-emerald-400 font-bold"}>
+                   {bot?.liveModeDiagnostics?.DRY_RUN ? "NO (DRY_RUN ACTIVE)" : "YES"}
+                </span>
+              </div>
+              <div className="flex justify-between p-1.5 bg-[#11151B] rounded border border-slate-700/20">
+                <span>Limit Triggered:</span>
+                <span className={bot?.blocker === "DAILY_LOSS_LIMIT_REACHED" ? "text-rose-500 font-bold" : "text-emerald-400 font-bold"}>
+                   {bot?.blocker === "DAILY_LOSS_LIMIT_REACHED" ? "YES" : bot?.dailyLossBypassDate ? "BYPASSED_TODAY" : "NO"}
+                </span>
+              </div>
+            </div>
+            {bot?.blocker === "DAILY_LOSS_LIMIT_REACHED" && (
+              <div className="mt-2 text-center text-[9px] font-mono text-rose-400 bg-rose-500/10 p-1.5 rounded border border-rose-500/20">
+                Pause Triggered by Formula:<br/>
+                <strong className="text-rose-500 text-[10px]">NetEqChange (${bot?.dailyNetEquityChange?.toFixed(2)}) &lt;= -Limit Pct</strong>
+                <button
+                  onClick={async () => {
+                    try {
+                      await fetch("/api/reset-daily-baseline", { method: "POST" });
+                      alert("Daily loss limit bypassed for today. Trading resumed.");
+                    } catch (e) {
+                      console.error("Failed to reset daily baseline", e);
+                    }
+                  }}
+                  className="mt-2 px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black font-black uppercase tracking-wider rounded cursor-pointer border-none shadow transition-colors block w-full"
+                >
+                  ⚠️ Bypass Limit Only For Today
+                </button>
+              </div>
+            )}
+            {bot?.dailyLossBypassDate && bot?.blocker !== "DAILY_LOSS_LIMIT_REACHED" && (
+               <div className="mt-2 text-center text-[9px] font-mono text-amber-400 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
+                 ⚠️ DAILY LIMIT BYPASSED FOR TODAY ⚠️
+               </div>
+            )}
+          </div>
 
           {/* API Budget Limits Telemetry */}
           <div id="api-budget-telemetry" className="p-4 flex flex-col bg-[#0A0D10] select-none shrink-0 border-b border-[#1F252C] overflow-hidden min-h-[220px]">

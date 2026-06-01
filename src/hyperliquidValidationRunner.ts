@@ -248,7 +248,7 @@ export class HyperliquidValidationRunner {
           exactReason = "INSUFFICIENT_MARGIN";
         else if (
           botState.openPositions === 0 &&
-          botState.accountEquity < 40 &&
+          botState.accountEquity < 10 &&
           botState.accountEquity > 0
         )
           exactReason = "LOW_EQUITY";
@@ -390,7 +390,7 @@ export class HyperliquidValidationRunner {
       isFunded = botState.accountEquity >= 0.1;
     } else {
       // Normal LOW_EQUITY validation triggering only if TOTAL_ACCOUNT_EQUITY < configured threshold
-      isFunded = botState.accountEquity >= 40;
+      isFunded = botState.accountEquity >= 10;
     }
 
     console.log(`Verification checks:

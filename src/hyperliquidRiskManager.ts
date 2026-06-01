@@ -43,11 +43,28 @@ export class HyperliquidRiskManager {
 
     const now = Date.now();
     const dailyLossLimit = botState.accountEquity * ((botState.config.dailyLossLimitPct ?? config.DAILY_LOSS_LIMIT_PCT) / 100);
-    const realizedNet = botState.analytics?.netProfitability || botState.realizedPnl || 0;
-    if (dailyLossLimit > 0 && realizedNet <= -dailyLossLimit) {
+    
+    // Use true equity difference if available, separating mock and live
+    let currentDailyLoss = 0;
+    if (!config.DRY_RUN && botState.dailyNetEquityChange !== undefined) {
+      currentDailyLoss = botState.dailyNetEquityChange;
+      if (Math.random() < 0.05) {
+         console.log("[LIVE_PNL_ACCOUNTING_ACTIVE] Live exchange equity used for daily loss tracking.");
+         console.log("[MOCK_PNL_EXCLUDED_FROM_LIVE_RISK] Mock trades strictly bypassed.");
+      }
+    } else {
+      currentDailyLoss = botState.analytics?.netProfitability || botState.realizedPnl || 0;
+    }
+
+    const currentDateString = new Date().toISOString().split('T')[0];
+    if (botState.dailyLossBypassDate === currentDateString) {
+      if (Math.random() < 0.05) {
+        console.log(`[DAILY_LOSS_BYPASSED] User explicitly bypassed daily loss limit for today: ${currentDateString}`);
+      }
+    } else if (dailyLossLimit > 0 && currentDailyLoss <= -dailyLossLimit) {
       botState.blocker = "DAILY_LOSS_LIMIT_REACHED";
-      console.warn(`[PHASE_1_SAFETY_CONFIG] Daily loss limit enforced. realized=${realizedNet.toFixed(2)}, limit=-${dailyLossLimit.toFixed(2)}.`);
-      console.warn(`[ENTRY_BLOCKED] symbol=${symbol}, reason=DAILY_LOSS_LIMIT, realized=${realizedNet.toFixed(2)}, limit=-${dailyLossLimit.toFixed(2)}`);
+      console.warn(`[PHASE_1_SAFETY_CONFIG] Daily loss limit enforced. NetEqChange/Realized=${currentDailyLoss.toFixed(2)}, limit=-${dailyLossLimit.toFixed(2)}.`);
+      console.warn(`[ENTRY_BLOCKED] symbol=${symbol}, reason=DAILY_LOSS_LIMIT, realized=${currentDailyLoss.toFixed(2)}, limit=-${dailyLossLimit.toFixed(2)}`);
       return false;
     }
 

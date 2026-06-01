@@ -91,6 +91,14 @@ export function calculatePositionSlots(): void {
   let effectiveMax = configuredMax;
   let reason = "NONE";
   let isHardSafety = false;
+  
+  if (botState.isSmallAccountMode) {
+      // 1 position for normal conditions, up to 2 if specifically allowed elsewhere, limit configuredMax initially
+      effectiveMax = Math.min(configuredMax, 1);
+      reason = "SMALL_ACCOUNT_POSITION_LIMIT_ACTIVE";
+      isHardSafety = false;
+      // We'll let bot.ts decide if a 2nd slot is allowed for elite setups by overriding this dynamically later if needed, but strict baseline here.
+  }
 
   // Real hard safety reasons that should restrict trading slots
   if (botState.protectionStatus === "REPAIRING" || botState.protectionStatus === "FAILED_EMERGENCY_CLOSE_REQUIRED") {

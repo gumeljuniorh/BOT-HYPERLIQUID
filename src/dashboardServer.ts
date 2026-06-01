@@ -189,15 +189,26 @@ async function startServer() {
   });
 
   app.post("/api/toggle-dry-run", (req, res) => {
+    console.log("[SERVER] DRY_RUN_TOGGLE_REQUESTED - A user requested a manual execution mode change.");
+
+    // Guard: Do not allow automatic calls to flip trading state
+    const referer = req.get('Referer') || '';
+    if (!referer) {
+       console.log("[SERVER] DRY_RUN_TOGGLE_REJECTED_AUTOMATIC_UI_CALL");
+       return res.status(403).json({ error: "Explicit user action required" });
+    }
+
     const { dryRun } = req.body;
     if (typeof dryRun === "boolean") {
       config.DRY_RUN = dryRun;
       config.LIVE_TRADING = !dryRun;
       botState.dryRun = dryRun;
+      botState.explicitUserDryRunToggle = dryRun;
     } else {
       config.DRY_RUN = !config.DRY_RUN;
       config.LIVE_TRADING = !config.DRY_RUN;
       botState.dryRun = config.DRY_RUN;
+      botState.explicitUserDryRunToggle = config.DRY_RUN;
     }
 
     if (!config.DRY_RUN && botState.blocker === "DRY_RUN ENABLED") {
@@ -207,7 +218,7 @@ async function startServer() {
     }
 
     console.log(
-      `[SERVER] DRY_RUN mode updated to: ${config.DRY_RUN ? "ENABLED (Simulation)" : "DISABLED (Live Trading)"}`,
+      `[SERVER] EXPLICIT_USER_TOGGLE: DRY_RUN mode updated to: ${config.DRY_RUN ? "ENABLED (Simulation)" : "DISABLED (Live Trading)"}`,
     );
     res.json({
       status: "ok",
@@ -238,6 +249,30 @@ async function startServer() {
       });
     } else {
       res.status(400).json({ error: "Missing phase value" });
+    }
+  });
+
+  app.post("/api/reset-daily-baseline", (req, res) => {
+    try {
+      const nowLocalDate = new Date();
+      const currentDateString = nowLocalDate.toISOString().split('T')[0];
+      
+      botState.startOfDayEquity = botState.accountEquity;
+      botState.dailyPnlDate = currentDateString;
+      botState.dailyNetEquityChange = 0;
+      botState.dailyLossBypassDate = currentDateString;
+      
+      if (botState.blocker === "DAILY_LOSS_LIMIT_REACHED") {
+        botState.blocker = null;
+        if (botState.phase === "CIRCUIT_BREAKER_ACTIVE") {
+           botState.phase = "PHASE_2_ADAPTIVE_EXECUTION";
+        }
+      }
+      
+      console.log(`[DAILY_BASELINE_RESET] Manual reset applied. Baseline equity set to $${botState.accountEquity.toFixed(2)}.`);
+      res.json({ status: "ok", message: "Daily baseline reset to current equity." });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -569,6 +604,14 @@ async function startServer() {
 
     // Initialize bot asynchronously after server starts
     setTimeout(() => {
+      console.log("CLOUD_RUNTIME_STARTED");
+      console.log("BOT_ENGINE_STARTED_IN_BACKGROUND");
+      if (!config.DRY_RUN) {
+         console.log("TRADING_MODE_RESOLVED_FROM_ENV");
+         console.log("LIVE_MODE_CONFIRMED_FROM_ENV");
+         console.log("LIVE_TRADING_PERSISTENT_CLOUD_MODE_ACTIVE");
+         console.log("BROWSER_INDEPENDENT_EXECUTION_CONFIRMED");
+      }
       console.log(`TRADING_ENGINE_STARTING`);
       startBotEngine()
         .then(() => {

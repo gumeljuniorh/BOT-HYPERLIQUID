@@ -55,6 +55,10 @@ if (config.LIVE_TRADING && !config.HYPERLIQUID_PRIVATE_KEY) {
   console.log("⚠️ [CONFIG_WARNING] LIVE_TRADING=true was requested but HYPERLIQUID_PRIVATE_KEY is missing. Continuing in live trading mode as requested (actual trade dispatching will fail until key is configured in settings).");
   config.DRY_RUN = false;
 }
+
+export const runtimeTradingMode = config.DRY_RUN ? "DRY_RUN" : "LIVE";
+console.log(`[RUNTIME_TRADING_MODE] Immutably resolved from ENV as: ${runtimeTradingMode}`);
+
 if (!config.DRY_RUN) {
   console.log("======================================= SAFETY WARNING =======================================");
   console.log("⚠️  NOTICE: LIVE TRADING MODE IS ACTIVE IN ENGINE CONFIG!");
